@@ -34,6 +34,7 @@
 #include "crc32c.h"
 #include "utils.h"
 #include "print-tree.h"
+#include "rbtree-utils.h"
 
 static int check_tree_block(struct btrfs_root *root, struct extent_buffer *buf)
 {
@@ -201,7 +202,8 @@ int read_whole_eb(struct btrfs_fs_info *info, struct extent_buffer *eb, int mirr
 		read_len = bytes_left;
 		device = NULL;
 
-		if (!info->on_restoring) {
+		if (!info->on_restoring &&
+		    eb->start != BTRFS_SUPER_INFO_OFFSET) {
 			ret = btrfs_map_block(&info->mapping_tree, READ,
 					      eb->start + offset, &read_len, &multi,
 					      mirror, NULL);
@@ -472,6 +474,8 @@ int btrfs_commit_transaction(struct btrfs_trans_handle *trans,
 	struct btrfs_fs_info *fs_info = root->fs_info;
 
 	if (root->commit_root == root->node)
+		goto commit_tree;
+	if (root == root->fs_info->tree_root)
 		goto commit_tree;
 
 	free_extent_buffer(root->commit_root);
@@ -908,6 +912,13 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 		printk("Couldn't setup csum tree\n");
 		if (!(flags & OPEN_CTREE_PARTIAL))
 			return -EIO;
+		/* do the same thing as extent tree rebuilding */
+		fs_info->csum_root->node =
+			btrfs_find_create_tree_block(fs_info->extent_root, 0,
+						     leafsize);
+		if (!fs_info->csum_root->node)
+			return -ENOMEM;
+		clear_extent_buffer_uptodate(NULL, fs_info->csum_root->node);
 	}
 	fs_info->csum_root->track_dirty = 1;
 
@@ -986,7 +997,7 @@ void btrfs_cleanup_all_caches(struct btrfs_fs_info *fs_info)
 
 int btrfs_scan_fs_devices(int fd, const char *path,
 			  struct btrfs_fs_devices **fs_devices,
-			  u64 sb_bytenr, int run_ioctl, int super_recover)
+			  u64 sb_bytenr, int super_recover)
 {
 	u64 total_devs;
 	int ret;
@@ -1001,7 +1012,7 @@ int btrfs_scan_fs_devices(int fd, const char *path,
 	}
 
 	if (total_devs != 1) {
-		ret = btrfs_scan_for_fsid(run_ioctl);
+		ret = btrfs_scan_lblkid(!BTRFS_UPDATE_KERNEL);
 		if (ret)
 			return ret;
 	}
@@ -1082,7 +1093,6 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 		fs_info->on_restoring = 1;
 
 	ret = btrfs_scan_fs_devices(fp, path, &fs_devices, sb_bytenr,
-				    !(flags & OPEN_CTREE_RECOVER_SUPER),
 				    (flags & OPEN_CTREE_RECOVER_SUPER));
 	if (ret)
 		goto out;
@@ -1129,13 +1139,10 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 
 	ret = btrfs_setup_all_roots(fs_info, root_tree_bytenr, flags);
 	if (ret)
-		goto out_failed;
+		goto out_chunk;
 
 	return fs_info;
 
-out_failed:
-	if (flags & OPEN_CTREE_PARTIAL)
-		return fs_info;
 out_chunk:
 	btrfs_release_all_roots(fs_info);
 	btrfs_cleanup_all_caches(fs_info);

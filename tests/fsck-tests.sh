@@ -24,19 +24,26 @@ run_check()
 
 rm -f $RESULT
 
-if [ -z $TEST_DEV ] || [ -z $TEST_MNT ];then
-	_fail "please set TEST_DEV and TEST_MNT"
-fi
-
 # test rely on corrupting blocks tool
 run_check make btrfs-corrupt-block
 
-for i in $(find $here/tests/fsck-tests -name '*.img')
+# Some broken filesystem images are kept as .img files, created by the tool
+# btrfs-image, and others are kept as .tar.xz files that contain raw filesystem
+# image (the backing file of a loop device, as a sparse file). The reason for
+# keeping some as tarballs of raw images is that for these cases btrfs-image
+# isn't able to preserve all the (bad) filesystem structure for some reason.
+for i in $(find $here/tests/fsck-tests -name '*.img' -o -name '*.tar.xz' | sort)
 do
 	echo "     [TEST]    $(basename $i)"
 	echo "testing image $i" >> $RESULT
 
-	run_check $here/btrfs-image -r $i test.img
+	extension=${i#*.}
+
+	if [ $extension == "img" ]; then
+		run_check $here/btrfs-image -r $i test.img
+	else
+		run_check tar xJf $i
+	fi
 
 	$here/btrfsck test.img >> $RESULT 2>&1
 	[ $? -eq 0 ] && _fail "btrfsck should have detected corruption"
@@ -44,6 +51,11 @@ do
 	run_check $here/btrfsck --repair test.img
 	run_check $here/btrfsck test.img
 done
+
+if [ -z $TEST_DEV ] || [ -z $TEST_MNT ];then
+	echo "     [NOTRUN] extent tree rebuild"
+	exit 0
+fi
 
 # test whether fsck can rebuild a corrupted extent tree
 test_extent_tree_rebuild()

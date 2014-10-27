@@ -5,13 +5,12 @@ CC = gcc
 LN = ln
 AR = ar
 AM_CFLAGS = -Wall -D_FILE_OFFSET_BITS=64 -DBTRFS_FLAT_INCLUDES -fno-strict-aliasing -fPIC
-#CFLAGS = -g -O1 -fno-strict-aliasing
-CFLAGS = -g -fno-strict-aliasing
+CFLAGS = -g -fno-strict-aliasing -rdynamic
 objects = ctree.o disk-io.o radix-tree.o extent-tree.o print-tree.o \
 	  root-tree.o dir-item.o file-item.o inode-item.o inode-map.o \
 	  extent-cache.o extent_io.o volumes.o utils.o repair.o \
 	  qgroup.o raid6.o free-space-cache.o list_sort.o props.o \
-	  ulist.o qgroup-verify.o
+	  ulist.o qgroup-verify.o backref.o rbtree-utils.o
 cmds_objects = cmds-subvolume.o cmds-filesystem.o cmds-device.o cmds-scrub.o \
 	       cmds-inspect.o cmds-balance.o cmds-send.o cmds-receive.o \
 	       cmds-quota.o cmds-qgroup.o cmds-replace.o cmds-check.o \
@@ -63,6 +62,10 @@ SUBDIRS =
 BUILDDIRS = $(patsubst %,build-%,$(SUBDIRS))
 INSTALLDIRS = $(patsubst %,install-%,$(SUBDIRS))
 CLEANDIRS = $(patsubst %,clean-%,$(SUBDIRS))
+
+ifeq ($(DISABLE_BACKTRACE),1)
+AM_CFLAGS += -DBTRFS_DISABLE_BACKTRACE
+endif
 
 ifneq ($(DISABLE_DOCUMENTATION),1)
 BUILDDIRS += build-Documentation
