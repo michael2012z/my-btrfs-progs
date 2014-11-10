@@ -53,6 +53,15 @@ struct seen_fsid {
 
 static struct seen_fsid *seen_fsid_hash[SEEN_FSID_HASH_SIZE] = {NULL,};
 
+static int is_seen_fsid(u8 *fsid)
+{
+	u8 hash = fsid[0];
+	int slot = hash % SEEN_FSID_HASH_SIZE;
+	struct seen_fsid *seen = seen_fsid_hash[slot];
+
+	return seen ? 1 : 0;
+}
+
 static int add_seen_fsid(u8 *fsid)
 {
 	u8 hash = fsid[0];
@@ -119,11 +128,11 @@ static const char * const cmd_df_usage[] = {
 	"-h                 human friendly numbers, base 1024 (default)",
 	"-H                 human friendly numbers, base 1000",
 	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
-	"--si               use 1000 as a base (kB, mB, gB, tB)",
+	"--si               use 1000 as a base (kB, MB, GB, TB)",
 	"-k|--kbytes        show sizes in KiB, or kB with --si",
-	"-m|--mbytes        show sizes in MiB, or mB with --si",
-	"-g|--gbytes        show sizes in GiB, or gB with --si",
-	"-t|--tbytes        show sizes in TiB, or tB with --si",
+	"-m|--mbytes        show sizes in MiB, or MB with --si",
+	"-g|--gbytes        show sizes in GiB, or GB with --si",
+	"-t|--tbytes        show sizes in TiB, or TB with --si",
        NULL
 };
 
@@ -241,7 +250,6 @@ static int cmd_df(int argc, char **argv)
 	DIR *dirstream = NULL;
 	unsigned unit_mode = UNITS_DEFAULT;
 
-	optind = 1;
 	while (1) {
 		int long_index;
 		static const struct option long_options[] = {
@@ -290,7 +298,7 @@ static int cmd_df(int argc, char **argv)
 		}
 	}
 
-	if (check_argc_max(argc, optind + 1))
+	if (check_argc_exact(argc, optind + 1))
 		usage(cmd_df_usage);
 
 	path = argv[optind];
@@ -767,6 +775,10 @@ static int map_seed_devices(struct list_head *all_uuids,
 			*found = 1;
 		}
 
+		/* skip all fs already shown as mounted fs */
+		if (is_seen_fsid(cur_fs->fsid))
+			continue;
+
 		fs_copy = malloc(sizeof(*fs_copy));
 		if (!fs_copy) {
 			ret = -ENOMEM;
@@ -936,7 +948,7 @@ static int cmd_show(int argc, char **argv)
 		goto out;
 
 devs_only:
-	ret = btrfs_scan_lblkid(!BTRFS_UPDATE_KERNEL);
+	ret = btrfs_scan_lblkid();
 
 	if (ret) {
 		fprintf(stderr, "ERROR: %d while scanning\n", ret);
