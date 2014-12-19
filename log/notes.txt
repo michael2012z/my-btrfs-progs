@@ -1,0 +1,6 @@
+Fri 12/19/2014
+  Today I read the article about btrfs free space management on CSDN again. I think I have fully understood it. 
+  Went through source code of load_free_space_cache(), no problem, understood.
+  load_free_space_cache() was called in cmds-check.c/check_space_cache(), next time I will go through it and try to find out how block-group is managed.
+
+
