@@ -1076,3 +1076,12 @@ void btrfs_print_tree(struct btrfs_root *root, struct extent_buffer *eb, int fol
 		free_extent_buffer(next);
 	}
 }
+
+static char* debug_files[]= {"cmds-check.c", "free-space-cache.c"};
+int mdebug_check(char * file_name) {
+  int i = 0;
+  for (i = 0; i < sizeof(debug_files)/sizeof(char*); i++)
+	if ((strcmp(debug_files[i], file_name)) == 0)
+	  return 1;
+  return 0;
+}

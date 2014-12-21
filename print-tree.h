@@ -23,4 +23,7 @@ void btrfs_print_tree(struct btrfs_root *root, struct extent_buffer *t, int foll
 void btrfs_print_key(struct btrfs_disk_key *disk_key);
 void print_chunk(struct extent_buffer *eb, struct btrfs_chunk *chunk);
 void print_extent_item(struct extent_buffer *eb, int slot, int metadata);
+int mdebug_check(char *);
+#define mdebuga if (mdebug_check(__FILE__)) printf("@@: %s: %d: ",__func__,__LINE__),printf
+#define mdebug if (mdebug_check(__FILE__)) printf
 #endif
