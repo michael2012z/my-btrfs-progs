@@ -1226,8 +1226,8 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 	u64 transid = 0;
 	u64 bytenr;
 
-	fprintf(stderr, "@@ %s: sb_bytenr = %llx\n", __func__, sb_bytenr);
-	fprintf(stderr, "@@ %s: max_super = %d\n", __func__, max_super);
+	mdebuga("sb_bytenr = %llx\n", sb_bytenr);
+	mdebuga("max_super = %d\n", max_super);
 
 	if (sb_bytenr != BTRFS_SUPER_INFO_OFFSET) {
 		ret = pread64(fd, &buf, sizeof(buf), sb_bytenr);

@@ -1,107 +1,55 @@
-root tree
-leaf 29376512 items 9 free space 13637 generation 4 owner 1
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
-	item 0 key (EXTENT_TREE ROOT_ITEM 0) itemoff 15844 itemsize 439
-		root data bytenr 29392896 level 0 dirid 0 refs 1 gen 4
-		uuid 00000000-0000-0000-0000-000000000000
-	item 1 key (DEV_TREE ROOT_ITEM 0) itemoff 15405 itemsize 439
-		root data bytenr 29409280 level 0 dirid 0 refs 1 gen 4
-		uuid 00000000-0000-0000-0000-000000000000
-	item 2 key (FS_TREE INODE_REF 6) itemoff 15388 itemsize 17
-		inode ref index 0 namelen 7 name: default
-	item 3 key (FS_TREE ROOT_ITEM 0) itemoff 14949 itemsize 439
-		root data bytenr 29360128 level 0 dirid 256 refs 1 gen 4
-		uuid 00000000-0000-0000-0000-000000000000
-	item 4 key (ROOT_TREE_DIR INODE_ITEM 0) itemoff 14789 itemsize 160
-		inode generation 3 transid 0 size 0 block group 0 mode 40755 links 1 uid 0 gid 0 rdev 0 flags 0x0
-	item 5 key (ROOT_TREE_DIR INODE_REF 6) itemoff 14777 itemsize 12
-		inode ref index 0 namelen 2 name: ..
-	item 6 key (ROOT_TREE_DIR DIR_ITEM 2378154706) itemoff 14740 itemsize 37
-		location key (FS_TREE ROOT_ITEM -1) type DIR
-		namelen 7 datalen 0 name: default
-	item 7 key (CSUM_TREE ROOT_ITEM 0) itemoff 14301 itemsize 439
-		root data bytenr 29425664 level 0 dirid 0 refs 1 gen 4
-		uuid 00000000-0000-0000-0000-000000000000
-	item 8 key (DATA_RELOC_TREE ROOT_ITEM 0) itemoff 13862 itemsize 439
-		root data bytenr 29442048 level 0 dirid 256 refs 1 gen 4
-		uuid 00000000-0000-0000-0000-000000000000
-chunk tree
-leaf 20971520 items 6 free space 15571 generation 4 owner 3
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
-	item 0 key (DEV_ITEMS DEV_ITEM 1) itemoff 16185 itemsize 98
-		dev item devid 1 total_bytes 15552479232 bytes used 2185232384
-		dev uuid 7095676a-d1f7-4f5a-ae7c-a8157b53a994
-	item 1 key (FIRST_CHUNK_TREE CHUNK_ITEM 0) itemoff 16105 itemsize 80
-		chunk length 4194304 owner 2 type SYSTEM num_stripes 1
-			stripe 0 devid 1 offset 0
-	item 2 key (FIRST_CHUNK_TREE CHUNK_ITEM 4194304) itemoff 16025 itemsize 80
-		chunk length 8388608 owner 2 type METADATA num_stripes 1
-			stripe 0 devid 1 offset 4194304
-	item 3 key (FIRST_CHUNK_TREE CHUNK_ITEM 12582912) itemoff 15945 itemsize 80
-		chunk length 8388608 owner 2 type DATA num_stripes 1
-			stripe 0 devid 1 offset 12582912
-	item 4 key (FIRST_CHUNK_TREE CHUNK_ITEM 20971520) itemoff 15833 itemsize 112
-		chunk length 8388608 owner 2 type SYSTEM|DUP num_stripes 2
-			stripe 0 devid 1 offset 20971520
-			stripe 1 devid 1 offset 29360128
-	item 5 key (FIRST_CHUNK_TREE CHUNK_ITEM 29360128) itemoff 15721 itemsize 112
-		chunk length 1073741824 owner 2 type METADATA|DUP num_stripes 2
-			stripe 0 devid 1 offset 37748736
-			stripe 1 devid 1 offset 1111490560
-@@ main:257, slot = 0, nritems = 9
-@@ main:268, disk_key.objectid = 2
-@@ main:274, BTRFS_ROOT_ITEM_KEY key found
-extent tree key (EXTENT_TREE ROOT_ITEM 0) 
-leaf 29392896 items 12 free space 15506 generation 4 owner 2
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 259: slot = 0, nritems = 9
+@@: main: 270: disk_key.objectid = 2
+@@: main: 276: BTRFS_ROOT_ITEM_KEY key found
+extent@@: main: 379: Will call print_extents()
+@@: print_extents: 59: print extent_buffer 0x41c000/4308992: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b57030
+leaf 4308992 items 10 free space 15604 generation 4 owner 2
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (0 BLOCK_GROUP_ITEM 4194304) itemoff 16259 itemsize 24
-		block group used 0 chunk_objectid 256 flags SYSTEM
-	item 1 key (4194304 BLOCK_GROUP_ITEM 8388608) itemoff 16235 itemsize 24
-		block group used 0 chunk_objectid 256 flags METADATA
-	item 2 key (12582912 BLOCK_GROUP_ITEM 8388608) itemoff 16211 itemsize 24
-		block group used 0 chunk_objectid 256 flags DATA
-	item 3 key (20971520 EXTENT_ITEM 16384) itemoff 16160 itemsize 51
+		block group used 16384 chunk_objectid 256 flags SYSTEM
+	item 1 key (131072 EXTENT_ITEM 16384) itemoff 16208 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (DEV_ITEMS DEV_ITEM 1) level 0
 		tree block backref root 3
-	item 4 key (20971520 BLOCK_GROUP_ITEM 8388608) itemoff 16136 itemsize 24
-		block group used 16384 chunk_objectid 256 flags SYSTEM|DUP
-	item 5 key (29360128 EXTENT_ITEM 16384) itemoff 16085 itemsize 51
+	item 2 key (4194304 EXTENT_ITEM 16384) itemoff 16157 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (256 INODE_ITEM 0) level 0
 		tree block backref root 5
-	item 6 key (29360128 BLOCK_GROUP_ITEM 1073741824) itemoff 16061 itemsize 24
-		block group used 98304 chunk_objectid 256 flags METADATA|DUP
-	item 7 key (29376512 EXTENT_ITEM 16384) itemoff 16010 itemsize 51
+	item 3 key (4194304 BLOCK_GROUP_ITEM 8388608) itemoff 16133 itemsize 24
+		block group used 98304 chunk_objectid 256 flags METADATA
+	item 4 key (4292608 EXTENT_ITEM 16384) itemoff 16082 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (EXTENT_TREE ROOT_ITEM 0) level 0
 		tree block backref root 1
-	item 8 key (29392896 EXTENT_ITEM 16384) itemoff 15959 itemsize 51
+	item 5 key (4308992 EXTENT_ITEM 16384) itemoff 16031 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (0 BLOCK_GROUP_ITEM 4194304) level 0
 		tree block backref root 2
-	item 9 key (29409280 EXTENT_ITEM 16384) itemoff 15908 itemsize 51
+	item 6 key (4325376 EXTENT_ITEM 16384) itemoff 15980 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (1 DEV_EXTENT 0) level 0
 		tree block backref root 4
-	item 10 key (29425664 EXTENT_ITEM 16384) itemoff 15857 itemsize 51
+	item 7 key (4341760 EXTENT_ITEM 16384) itemoff 15929 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (0 UNKNOWN.0 0) level 0
 		tree block backref root 7
-	item 11 key (29442048 EXTENT_ITEM 16384) itemoff 15806 itemsize 51
+	item 8 key (4358144 EXTENT_ITEM 16384) itemoff 15878 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (256 INODE_ITEM 0) level 0
 		tree block backref root 18446744073709551607
-@@ main:257, slot = 1, nritems = 9
-@@ main:268, disk_key.objectid = 4
-@@ main:274, BTRFS_ROOT_ITEM_KEY key found
-device tree key (DEV_TREE ROOT_ITEM 0) 
-leaf 29409280 items 7 free space 15772 generation 4 owner 4
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+	item 9 key (12582912 BLOCK_GROUP_ITEM 8388608) itemoff 15854 itemsize 24
+		block group used 0 chunk_objectid 256 flags DATA
+@@: main: 259: slot = 1, nritems = 9
+@@: main: 270: disk_key.objectid = 4
+@@: main: 276: BTRFS_ROOT_ITEM_KEY key found
+device@@: main: 379: Will call print_extents()
+@@: print_extents: 59: print extent_buffer 0x420000/4325376: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b5b090
+leaf 4325376 items 3 free space 16064 generation 4 owner 4
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (1 DEV_EXTENT 0) itemoff 16235 itemsize 48
 		dev extent chunk_tree 3
 		chunk objectid 256 chunk offset 0 length 4194304
@@ -111,126 +59,95 @@ chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
 	item 2 key (1 DEV_EXTENT 12582912) itemoff 16139 itemsize 48
 		dev extent chunk_tree 3
 		chunk objectid 256 chunk offset 12582912 length 8388608
-	item 3 key (1 DEV_EXTENT 20971520) itemoff 16091 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 20971520 length 8388608
-	item 4 key (1 DEV_EXTENT 29360128) itemoff 16043 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 20971520 length 8388608
-	item 5 key (1 DEV_EXTENT 37748736) itemoff 15995 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 29360128 length 1073741824
-	item 6 key (1 DEV_EXTENT 1111490560) itemoff 15947 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 29360128 length 1073741824
-@@ main:257, slot = 2, nritems = 9
-@@ main:268, disk_key.objectid = 5
-@@ main:257, slot = 3, nritems = 9
-@@ main:268, disk_key.objectid = 5
-@@ main:274, BTRFS_ROOT_ITEM_KEY key found
-fs tree key (FS_TREE ROOT_ITEM 0) 
-leaf 29360128 items 2 free space 16061 generation 4 owner 5
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
-	item 0 key (256 INODE_ITEM 0) itemoff 16123 itemsize 160
-		inode generation 3 transid 0 size 0 block group 0 mode 40755 links 1 uid 0 gid 0 rdev 0 flags 0x0
-	item 1 key (256 INODE_REF 256) itemoff 16111 itemsize 12
-		inode ref index 0 namelen 2 name: ..
-@@ main:257, slot = 4, nritems = 9
-@@ main:268, disk_key.objectid = 6
-@@ main:257, slot = 5, nritems = 9
-@@ main:268, disk_key.objectid = 6
-@@ main:257, slot = 6, nritems = 9
-@@ main:268, disk_key.objectid = 6
-@@ main:257, slot = 7, nritems = 9
-@@ main:268, disk_key.objectid = 7
-@@ main:274, BTRFS_ROOT_ITEM_KEY key found
-checksum tree key (CSUM_TREE ROOT_ITEM 0) 
-leaf 29425664 items 0 free space 16283 generation 4 owner 7
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
-@@ main:257, slot = 8, nritems = 9
-@@ main:268, disk_key.objectid = fffffffffffffff7
-@@ main:274, BTRFS_ROOT_ITEM_KEY key found
-data reloc tree key (DATA_RELOC_TREE ROOT_ITEM 0) 
-leaf 29442048 items 2 free space 16061 generation 4 owner 18446744073709551607
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
-	item 0 key (256 INODE_ITEM 0) itemoff 16123 itemsize 160
-		inode generation 3 transid 0 size 0 block group 0 mode 40755 links 1 uid 0 gid 0 rdev 0 flags 0x0
-	item 1 key (256 INODE_REF 256) itemoff 16111 itemsize 12
-		inode ref index 0 namelen 2 name: ..
-@@ main:257, slot = 9, nritems = 9
+@@: main: 259: slot = 2, nritems = 9
+@@: main: 270: disk_key.objectid = 5
+@@: main: 259: slot = 3, nritems = 9
+@@: main: 270: disk_key.objectid = 5
+@@: main: 276: BTRFS_ROOT_ITEM_KEY key found
+@@: main: 259: slot = 4, nritems = 9
+@@: main: 270: disk_key.objectid = 6
+@@: main: 259: slot = 5, nritems = 9
+@@: main: 270: disk_key.objectid = 6
+@@: main: 259: slot = 6, nritems = 9
+@@: main: 270: disk_key.objectid = 6
+@@: main: 259: slot = 7, nritems = 9
+@@: main: 270: disk_key.objectid = 7
+@@: main: 276: BTRFS_ROOT_ITEM_KEY key found
+@@: main: 259: slot = 8, nritems = 9
+@@: main: 270: disk_key.objectid = fffffffffffffff7
+@@: main: 276: BTRFS_ROOT_ITEM_KEY key found
+@@: main: 259: slot = 9, nritems = 9
 
+@@: main: 402: finished looping through leaves
 
-@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
-
-@@ main:403, print fs_root->node
-leaf 29360128 items 2 free space 16061 generation 4 owner 5
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 407: print fs_root->node
+@@: print_extents: 59: print extent_buffer 0x400000/4194304: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b63150
+leaf 4194304 items 2 free space 16061 generation 4 owner 5
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (256 INODE_ITEM 0) itemoff 16123 itemsize 160
 		inode generation 3 transid 0 size 0 block group 0 mode 40755 links 1 uid 0 gid 0 rdev 0 flags 0x0
 	item 1 key (256 INODE_REF 256) itemoff 16111 itemsize 12
 		inode ref index 0 namelen 2 name: ..
 
-@@ main:408, print extent_root->node
-leaf 29392896 items 12 free space 15506 generation 4 owner 2
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 412: print extent_root->node
+@@: print_extents: 59: print extent_buffer 0x41c000/4308992: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b57030
+leaf 4308992 items 10 free space 15604 generation 4 owner 2
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (0 BLOCK_GROUP_ITEM 4194304) itemoff 16259 itemsize 24
-		block group used 0 chunk_objectid 256 flags SYSTEM
-	item 1 key (4194304 BLOCK_GROUP_ITEM 8388608) itemoff 16235 itemsize 24
-		block group used 0 chunk_objectid 256 flags METADATA
-	item 2 key (12582912 BLOCK_GROUP_ITEM 8388608) itemoff 16211 itemsize 24
-		block group used 0 chunk_objectid 256 flags DATA
-	item 3 key (20971520 EXTENT_ITEM 16384) itemoff 16160 itemsize 51
+		block group used 16384 chunk_objectid 256 flags SYSTEM
+	item 1 key (131072 EXTENT_ITEM 16384) itemoff 16208 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (DEV_ITEMS DEV_ITEM 1) level 0
 		tree block backref root 3
-	item 4 key (20971520 BLOCK_GROUP_ITEM 8388608) itemoff 16136 itemsize 24
-		block group used 16384 chunk_objectid 256 flags SYSTEM|DUP
-	item 5 key (29360128 EXTENT_ITEM 16384) itemoff 16085 itemsize 51
+	item 2 key (4194304 EXTENT_ITEM 16384) itemoff 16157 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (256 INODE_ITEM 0) level 0
 		tree block backref root 5
-	item 6 key (29360128 BLOCK_GROUP_ITEM 1073741824) itemoff 16061 itemsize 24
-		block group used 98304 chunk_objectid 256 flags METADATA|DUP
-	item 7 key (29376512 EXTENT_ITEM 16384) itemoff 16010 itemsize 51
+	item 3 key (4194304 BLOCK_GROUP_ITEM 8388608) itemoff 16133 itemsize 24
+		block group used 98304 chunk_objectid 256 flags METADATA
+	item 4 key (4292608 EXTENT_ITEM 16384) itemoff 16082 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (EXTENT_TREE ROOT_ITEM 0) level 0
 		tree block backref root 1
-	item 8 key (29392896 EXTENT_ITEM 16384) itemoff 15959 itemsize 51
+	item 5 key (4308992 EXTENT_ITEM 16384) itemoff 16031 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (0 BLOCK_GROUP_ITEM 4194304) level 0
 		tree block backref root 2
-	item 9 key (29409280 EXTENT_ITEM 16384) itemoff 15908 itemsize 51
+	item 6 key (4325376 EXTENT_ITEM 16384) itemoff 15980 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (1 DEV_EXTENT 0) level 0
 		tree block backref root 4
-	item 10 key (29425664 EXTENT_ITEM 16384) itemoff 15857 itemsize 51
+	item 7 key (4341760 EXTENT_ITEM 16384) itemoff 15929 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (0 UNKNOWN.0 0) level 0
 		tree block backref root 7
-	item 11 key (29442048 EXTENT_ITEM 16384) itemoff 15806 itemsize 51
+	item 8 key (4358144 EXTENT_ITEM 16384) itemoff 15878 itemsize 51
 		extent refs 1 gen 4 flags TREE_BLOCK
 		tree block key (256 INODE_ITEM 0) level 0
 		tree block backref root 18446744073709551607
+	item 9 key (12582912 BLOCK_GROUP_ITEM 8388608) itemoff 15854 itemsize 24
+		block group used 0 chunk_objectid 256 flags DATA
 
-@@ main:413, print tree_root->node
-leaf 29376512 items 9 free space 13637 generation 4 owner 1
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 417: print tree_root->node
+@@: print_extents: 59: print extent_buffer 0x418000/4292608: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b52fd0
+leaf 4292608 items 9 free space 13637 generation 4 owner 1
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (EXTENT_TREE ROOT_ITEM 0) itemoff 15844 itemsize 439
-		root data bytenr 29392896 level 0 dirid 0 refs 1 gen 4
+		root data bytenr 4308992 level 0 dirid 0 refs 1 gen 4
 		uuid 00000000-0000-0000-0000-000000000000
 	item 1 key (DEV_TREE ROOT_ITEM 0) itemoff 15405 itemsize 439
-		root data bytenr 29409280 level 0 dirid 0 refs 1 gen 4
+		root data bytenr 4325376 level 0 dirid 0 refs 1 gen 4
 		uuid 00000000-0000-0000-0000-000000000000
 	item 2 key (FS_TREE INODE_REF 6) itemoff 15388 itemsize 17
 		inode ref index 0 namelen 7 name: default
 	item 3 key (FS_TREE ROOT_ITEM 0) itemoff 14949 itemsize 439
-		root data bytenr 29360128 level 0 dirid 256 refs 1 gen 4
+		root data bytenr 4194304 level 0 dirid 256 refs 1 gen 4
 		uuid 00000000-0000-0000-0000-000000000000
 	item 4 key (ROOT_TREE_DIR INODE_ITEM 0) itemoff 14789 itemsize 160
 		inode generation 3 transid 0 size 0 block group 0 mode 40755 links 1 uid 0 gid 0 rdev 0 flags 0x0
@@ -240,19 +157,21 @@ chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
 		location key (FS_TREE ROOT_ITEM -1) type DIR
 		namelen 7 datalen 0 name: default
 	item 7 key (CSUM_TREE ROOT_ITEM 0) itemoff 14301 itemsize 439
-		root data bytenr 29425664 level 0 dirid 0 refs 1 gen 4
+		root data bytenr 4341760 level 0 dirid 0 refs 1 gen 4
 		uuid 00000000-0000-0000-0000-000000000000
 	item 8 key (DATA_RELOC_TREE ROOT_ITEM 0) itemoff 13862 itemsize 439
-		root data bytenr 29442048 level 0 dirid 256 refs 1 gen 4
+		root data bytenr 4358144 level 0 dirid 256 refs 1 gen 4
 		uuid 00000000-0000-0000-0000-000000000000
 
-@@ main:418, print chunk_root->node
-leaf 20971520 items 6 free space 15571 generation 4 owner 3
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 422: print chunk_root->node
+@@: print_extents: 59: print extent_buffer 0x20000/131072: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b4ef70
+leaf 131072 items 4 free space 15845 generation 4 owner 3
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (DEV_ITEMS DEV_ITEM 1) itemoff 16185 itemsize 98
-		dev item devid 1 total_bytes 15552479232 bytes used 2185232384
-		dev uuid 7095676a-d1f7-4f5a-ae7c-a8157b53a994
+		dev item devid 1 total_bytes 15552479232 bytes used 20971520
+		dev uuid 00349304-63d5-4087-bc8d-0cc503b21d62
 	item 1 key (FIRST_CHUNK_TREE CHUNK_ITEM 0) itemoff 16105 itemsize 80
 		chunk length 4194304 owner 2 type SYSTEM num_stripes 1
 			stripe 0 devid 1 offset 0
@@ -262,19 +181,13 @@ chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
 	item 3 key (FIRST_CHUNK_TREE CHUNK_ITEM 12582912) itemoff 15945 itemsize 80
 		chunk length 8388608 owner 2 type DATA num_stripes 1
 			stripe 0 devid 1 offset 12582912
-	item 4 key (FIRST_CHUNK_TREE CHUNK_ITEM 20971520) itemoff 15833 itemsize 112
-		chunk length 8388608 owner 2 type SYSTEM|DUP num_stripes 2
-			stripe 0 devid 1 offset 20971520
-			stripe 1 devid 1 offset 29360128
-	item 5 key (FIRST_CHUNK_TREE CHUNK_ITEM 29360128) itemoff 15721 itemsize 112
-		chunk length 1073741824 owner 2 type METADATA|DUP num_stripes 2
-			stripe 0 devid 1 offset 37748736
-			stripe 1 devid 1 offset 1111490560
 
-@@ main:423, print dev_root->node
-leaf 29409280 items 7 free space 15772 generation 4 owner 4
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 427: print dev_root->node
+@@: print_extents: 59: print extent_buffer 0x420000/4325376: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b5b090
+leaf 4325376 items 3 free space 16064 generation 4 owner 4
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 	item 0 key (1 DEV_EXTENT 0) itemoff 16235 itemsize 48
 		dev extent chunk_tree 3
 		chunk objectid 256 chunk offset 0 length 4194304
@@ -284,26 +197,12 @@ chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
 	item 2 key (1 DEV_EXTENT 12582912) itemoff 16139 itemsize 48
 		dev extent chunk_tree 3
 		chunk objectid 256 chunk offset 12582912 length 8388608
-	item 3 key (1 DEV_EXTENT 20971520) itemoff 16091 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 20971520 length 8388608
-	item 4 key (1 DEV_EXTENT 29360128) itemoff 16043 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 20971520 length 8388608
-	item 5 key (1 DEV_EXTENT 37748736) itemoff 15995 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 29360128 length 1073741824
-	item 6 key (1 DEV_EXTENT 1111490560) itemoff 15947 itemsize 48
-		dev extent chunk_tree 3
-		chunk objectid 256 chunk offset 29360128 length 1073741824
 
-@@ main:428, print csum_root->node
-leaf 29425664 items 0 free space 16283 generation 4 owner 7
-fs uuid 1ac90644-d124-4633-9679-1d21653e92a6
-chunk uuid 08c7e9ad-2bc8-4667-bac2-20675fc28dae
+@@: main: 432: print csum_root->node
+@@: print_extents: 59: print extent_buffer 0x424000/4341760: leaf
+@@: btrfs_print_leaf: 802: extent_buffer = 0x9b5f0f0
+leaf 4341760 items 0 free space 16283 generation 4 owner 7
+fs uuid 598412fb-7758-4d10-b5cb-16e27550bb8a
+chunk uuid 398dd596-6dfc-42de-9e29-cb6a474acb76
 
 
-total bytes 15552479232
-bytes used 114688
-uuid 1ac90644-d124-4633-9679-1d21653e92a6
-Btrfs v3.17.3

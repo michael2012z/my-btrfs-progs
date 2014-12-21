@@ -799,6 +799,8 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 	u32 type;
 	char bg_flags_str[32];
 
+	mdebuga("extent_buffer = 0x%x\n", (unsigned int)l);
+
 	printf("leaf %llu items %d free space %d generation %llu owner %llu\n",
 		(unsigned long long)btrfs_header_bytenr(l), nr,
 		btrfs_leaf_free_space(root, l),
@@ -1077,7 +1079,12 @@ void btrfs_print_tree(struct btrfs_root *root, struct extent_buffer *eb, int fol
 	}
 }
 
-static char* debug_files[]= {"cmds-check.c", "free-space-cache.c"};
+static char* debug_files[]= {
+  "cmds-check.c", 
+  "free-space-cache.c",
+  "btrfs-debug-tree.c",
+  "print-tree.c",
+};
 int mdebug_check(char * file_name) {
   int i = 0;
   for (i = 0; i < sizeof(debug_files)/sizeof(char*); i++)

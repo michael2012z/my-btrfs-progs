@@ -4229,10 +4229,13 @@ static int check_space_cache(struct btrfs_root *root)
 		return 0;
 	}
 
+	mdebuga("\n");
 	while (1) {
 		cache = btrfs_lookup_first_block_group(root->fs_info, start);
 		if (!cache)
 			break;
+
+		mdebuga("start = 0x%llx, objectid = 0x%llx, offset = 0x%llx\n", start,  cache->key.objectid, cache->key.offset);
 
 		start = cache->key.objectid + cache->key.offset;
 		if (!cache->free_space_ctl) {

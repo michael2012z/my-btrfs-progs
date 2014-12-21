@@ -56,6 +56,8 @@ static void print_extents(struct btrfs_root *root, struct extent_buffer *eb)
 	if (!eb)
 		return;
 
+	mdebuga("print extent_buffer 0x%llx/%llu: %s\n", (unsigned long long)btrfs_header_bytenr(eb), (unsigned long long)btrfs_header_bytenr(eb), (btrfs_is_leaf(eb)?"leaf":"non-leaf"));
+	
 	if (btrfs_is_leaf(eb)) {
 		btrfs_print_leaf(root, eb);
 		return;
@@ -250,28 +252,33 @@ again:
 	ret = btrfs_search_slot(NULL, tree_root_scan, &key, &path, 0, 0);
 	BUG_ON(ret < 0);
 
+	mdebuga("\nprint path.nodes[0]:\n");
+	if (mdebug_check(__FILE__)) 
+	  print_extents(tree_root_scan, path.nodes[0]);
+	mdebuga("++++++++++++++++++++++\n\n\n");
+
 	/* @@, loop all LEAVES of the tree */
 	while(1) {
 		leaf = path.nodes[0];
 		slot = path.slots[0];
-		printf("@@ %s:%d, slot = %x, nritems = %x\n", __func__, __LINE__, slot, btrfs_header_nritems(leaf));
+		mdebuga("slot = %x, nritems = %x\n", slot, btrfs_header_nritems(leaf));
 		if (slot >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(tree_root_scan, &path);
 			if (ret != 0)
 				break;
 			leaf = path.nodes[0];
 			slot = path.slots[0];
-			printf("@@ %s:%d, slot = %x\n", __func__, __LINE__, slot);
+			mdebuga("slot = %x\n", slot);
 		}
 		btrfs_item_key(leaf, &disk_key, path.slots[0]);
 		btrfs_disk_key_to_cpu(&found_key, &disk_key);
-		printf("@@ %s:%d, disk_key.objectid = %llx\n", __func__, __LINE__, disk_key.objectid);
+		mdebuga("disk_key.objectid = %llx\n", disk_key.objectid);
 		if (btrfs_key_type(&found_key) == BTRFS_ROOT_ITEM_KEY) {
 			unsigned long offset;
 			struct extent_buffer *buf;
 			int skip = extent_only | device_only | uuid_tree_only;
 
-			printf("@@ %s:%d, BTRFS_ROOT_ITEM_KEY key found\n", __func__, __LINE__);
+			mdebuga("BTRFS_ROOT_ITEM_KEY key found\n");
 			/* @@: data offset */
 			offset = btrfs_item_ptr_offset(leaf, slot);
 			/* @@: read root item */
@@ -374,8 +381,7 @@ again:
 				}
 			}
 			if (extent_only && !skip) {
-				printf("@@ %s:%d, will call print_extents()\n", __func__, __LINE__);
-				/*printf("@@ %s:%d, fs_info: fs_root = %x, extent_root = %x, tree_root = %x, chunk_root = %x, dev_root = %x, csum_root = %x, quota_root = %x\n", __func__, __LINE__, fs->fs_root, fs->extent_root, fs->tree_root, fs->chunk_root, fs->dev_root, fs->csum_root, fs->quota_root);*/
+				mdebuga("Will call print_extents()\n");
 				print_extents(tree_root_scan, buf);
 			} else if (!skip) {
 				printf(" tree ");
@@ -397,45 +403,48 @@ next:
 no_node:
 	btrfs_release_path(&path);
 
-	printf("\n\n@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n");
+	mdebug("\n");
+	mdebuga("finished looping through leaves\n\n");
 
-	if (info->fs_root && info->fs_root->node) {
-	  printf("@@ %s:%d, print fs_root->node\n", __func__, __LINE__);
-	  print_extents(info->fs_root, info->fs_root->node);
+	// @@: print some interested trees
+	if (mdebug_check(__FILE__)) {
+	  if (info->fs_root && info->fs_root->node) {
+		mdebuga("print fs_root->node\n");
+		print_extents(info->fs_root, info->fs_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->extent_root && info->extent_root->node) {
+		mdebuga("print extent_root->node\n");
+		print_extents(info->extent_root, info->extent_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->tree_root && info->tree_root->node) {
+		mdebuga("print tree_root->node\n");
+		print_extents(info->tree_root, info->tree_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->chunk_root && info->chunk_root->node) {
+		mdebuga("print chunk_root->node\n");
+		print_extents(info->chunk_root, info->chunk_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->dev_root && info->dev_root->node) {
+		mdebuga("print dev_root->node\n");
+		print_extents(info->dev_root, info->dev_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->csum_root && info->csum_root->node) {
+		mdebuga("print csum_root->node\n");
+		print_extents(info->csum_root, info->csum_root->node);
+	  }
+	  mdebug("\n");
+	  if (info->quota_root && info->quota_root->node) {
+		mdebuga("print quota_root->node\n");
+		print_extents(info->quota_root, info->quota_root->node);
+	  }
+	  mdebug("\n");
 	}
-	printf("\n");
-	if (info->extent_root && info->extent_root->node) {
-	  printf("@@ %s:%d, print extent_root->node\n", __func__, __LINE__);
-	  print_extents(info->extent_root, info->extent_root->node);
-	}
-	printf("\n");
-	if (info->tree_root && info->tree_root->node) {
-	  printf("@@ %s:%d, print tree_root->node\n", __func__, __LINE__);
-	  print_extents(info->tree_root, info->tree_root->node);
-	}
-	printf("\n");
-	if (info->chunk_root && info->chunk_root->node) {
-	  printf("@@ %s:%d, print chunk_root->node\n", __func__, __LINE__);
-	  print_extents(info->chunk_root, info->chunk_root->node);
-	}
-	printf("\n");
-	if (info->dev_root && info->dev_root->node) {
-	  printf("@@ %s:%d, print dev_root->node\n", __func__, __LINE__);
-	  print_extents(info->dev_root, info->dev_root->node);
-	}
-	printf("\n");
-	if (info->csum_root && info->csum_root->node) {
-	  printf("@@ %s:%d, print csum_root->node\n", __func__, __LINE__);
-	  print_extents(info->csum_root, info->csum_root->node);
-	}
-	printf("\n");
-	if (info->quota_root && info->quota_root->node) {
-	  printf("@@ %s:%d, print quota_root->node\n", __func__, __LINE__);
-	  print_extents(info->quota_root, info->quota_root->node);
-	}
-	printf("\n");
-
-
+	
 	if (tree_root_scan == info->tree_root &&
 	    info->log_root_tree) {
 		tree_root_scan = info->log_root_tree;

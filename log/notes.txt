@@ -3,4 +3,10 @@ Fri 12/19/2014
   Went through source code of load_free_space_cache(), no problem, understood.
   load_free_space_cache() was called in cmds-check.c/check_space_cache(), next time I will go through it and try to find out how block-group is managed.
 
-
+Sun 12/21/2014
+  Block-group is used for space allocation. According to wikipedia, "The file system zones its allocated space into block groups, which are variable-sized allocation regions...".
+  Today I came back to btrfs-debug-tree program again, diged more and understood deeply.
+  Next step, I'm going to find the answer of:
+  	   1. How does 'search' work?
+	   2. In btrfs-debug-tree searching, key type BTRFS_ROOT_ITEM_KEY was specified, what's checked in walking? What's the relation between the search result path.nodes[0] and extent_root->node?
+	   Answer: what searching returned with "BTRFS_ROOT_ITEM_KEY" is extent_root->node. The program read the content extent_root->node items specifies, each of which is a tree root.
