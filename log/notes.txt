@@ -6,7 +6,11 @@ Fri 12/19/2014
 Sun 12/21/2014
   Block-group is used for space allocation. According to wikipedia, "The file system zones its allocated space into block groups, which are variable-sized allocation regions...".
   Today I came back to btrfs-debug-tree program again, diged more and understood deeply.
+  In searching result, path.nodes[0] is a extent_buffer, there are blocks/items in it, each of which is of key-type BTRFS_ROOT_ITEM_KEY. Each of them contains a record of a tree root, according to them, corresponding tree root are found, that is "buf".
   Next step, I'm going to find the answer of:
   	   1. How does 'search' work?
 	   2. In btrfs-debug-tree searching, key type BTRFS_ROOT_ITEM_KEY was specified, what's checked in walking? What's the relation between the search result path.nodes[0] and extent_root->node?
 	   Answer: what searching returned with "BTRFS_ROOT_ITEM_KEY" is extent_root->node. The program read the content extent_root->node items specifies, each of which is a tree root.
+	   3. How is all the info loaded to memory?
+  Will try to add some content to device gradually and check the output change. Order is: mount, single small file, single large file, single folder, file under folder, ...
+
