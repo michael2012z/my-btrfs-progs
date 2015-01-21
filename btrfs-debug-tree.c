@@ -181,6 +181,13 @@ int main(int ac, char **av)
 	if (check_argc_exact(ac, 1))
 		print_usage();
 
+	ret = check_arg_type(av[optind]);
+	if (ret != BTRFS_ARG_BLKDEV && ret != BTRFS_ARG_REG) {
+		fprintf(stderr, "'%s' is not a block device or regular file\n",
+			av[optind]);
+		exit(1);
+	}
+
 	info = open_ctree_fs_info(av[optind], 0, 0, OPEN_CTREE_PARTIAL);
 	if (!info) {
 		fprintf(stderr, "unable to open %s\n", av[optind]);

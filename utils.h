@@ -35,10 +35,14 @@
 #define BTRFS_ARG_MNTPOINT	1
 #define BTRFS_ARG_UUID		2
 #define BTRFS_ARG_BLKDEV	3
+#define BTRFS_ARG_REG		4
 
 #define BTRFS_UUID_UNPARSED_SIZE	37
 
 #define ARGV0_BUF_SIZE	PATH_MAX
+
+#define GETOPT_VAL_SI	256
+#define GETOPT_VAL_IEC	257
 
 int check_argc_exact(int nargs, int expected);
 int check_argc_min(int nargs, int expected);
@@ -115,6 +119,7 @@ int set_label(const char *btrfs_dev, const char *label);
 char *__strncpy__null(char *dest, const char *src, size_t n);
 int is_block_device(const char *file);
 int is_mount_point(const char *file);
+int check_arg_type(const char *input);
 int open_path_or_dev_mnt(const char *path, DIR **dirstream);
 u64 btrfs_device_size(int fd, struct stat *st);
 /* Helper to always get proper size of the destination string */
@@ -134,6 +139,12 @@ int find_mount_root(const char *path, char **mount_root);
 int get_device_info(int fd, u64 devid,
 		struct btrfs_ioctl_dev_info_args *di_args);
 int test_uuid_unique(char *fs_uuid);
+u64 disk_size(char *path);
+int get_device_info(int fd, u64 devid,
+		struct btrfs_ioctl_dev_info_args *di_args);
+u64 get_partition_size(char *dev);
+const char* group_type_str(u64 flags);
+const char* group_profile_str(u64 flags);
 
 int test_minimum_size(const char *file, u32 leafsize);
 int test_issubvolname(const char *name);
@@ -160,5 +171,36 @@ static inline u64 btrfs_min_dev_size(u32 leafsize)
 }
 
 int find_next_key(struct btrfs_path *path, struct btrfs_key *key);
+char* btrfs_group_type_str(u64 flag);
+char* btrfs_group_profile_str(u64 flag);
+
+/*
+ * Get the length of the string converted from a u64 number.
+ *
+ * Result is equal to log10(num) + 1, but without the use of math library.
+ */
+static inline int count_digits(u64 num)
+{
+	int ret = 0;
+
+	if (num == 0)
+		return 1;
+	while (num > 0) {
+		ret++;
+		num /= 10;
+	}
+	return ret;
+}
+
+static inline u64 div_factor(u64 num, int factor)
+{
+	if (factor == 10)
+		return num;
+	num *= factor;
+	num /= 10;
+	return num;
+}
+
+int btrfs_tree_search2_ioctl_supported(int fd);
 
 #endif

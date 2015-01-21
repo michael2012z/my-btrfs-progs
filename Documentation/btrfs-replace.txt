@@ -13,14 +13,16 @@ DESCRIPTION
 -----------
 *btrfs replace* is used to replace btrfs managed devices with other device.
 
-Note: this is not currently supported for RAID5/6 profiles and must use the
+NOTE: this is not currently supported for RAID5/6 profiles and must use the
 device add/delete workaround.
-
 It is recommended to see `btrfs-device`(8) for more details about btrfs device
 management.
 
 SUBCOMMAND
 ----------
+*cancel* <mount_point>::
+Cancel a running device replace operation.
+
 *start* [-Bfr] <srcdev>|<devid> <targetdev> <path>::
 Replace device of a btrfs filesystem.
 +
@@ -49,6 +51,7 @@ containing a valid btrfs filesystem.
 A valid filesystem is assumed if a btrfs superblock is found which contains a
 correct checksum. Devices which are currently mounted are
 never allowed to be used as the <targetdev>.
++
 -B::::
 no background replace.
 
@@ -60,9 +63,6 @@ Print status and progress information of a running device replace operation.
 -1::::
 print once instead of print continuously until the replace
 operation finishes (or is canceled)
-
-*cancel* <mount_point>::
-Cancel a running device replace operation.
 
 EXIT STATUS
 -----------

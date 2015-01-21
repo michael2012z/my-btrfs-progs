@@ -1,8 +1,4 @@
-
 /*
- * Copyright (C) 2012 FUJITSU LIMITED.  All rights reserved.
- * Written by Miao Xie <miaox@cn.fujitsu.com>
- *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
  * License v2 as published by the Free Software Foundation.
@@ -18,16 +14,23 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __BTRFS_MATH_H
-#define __BTRFS_MATH_H
+#ifndef STRING_TABLE_H
+#define STRING_TABLE_H
 
-static inline u64 div_factor(u64 num, int factor)
-{
-	if (factor == 10)
-		return num;
-	num *= factor;
-	num /= 10;
-	return num;
-}
+struct string_table {
+
+	int	ncols, nrows;
+	char	*cells[];
+
+};
+
+
+struct string_table *table_create(int columns, int rows);
+char *table_printf(struct string_table *tab, int column, int row,
+			  char *fmt, ...);
+char *table_vprintf(struct string_table *tab, int column, int row,
+			  char *fmt, va_list ap);
+void table_dump(struct string_table *tab);
+void table_free(struct string_table *);
 
 #endif

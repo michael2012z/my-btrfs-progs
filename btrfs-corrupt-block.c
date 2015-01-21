@@ -1068,6 +1068,7 @@ int main(int ac, char **av)
 				break;
 			case 'U':
 				chunk_tree = 1;
+				break;
 			case 'i':
 				inode = arg_strtou64(optarg);
 				break;
@@ -1096,6 +1097,7 @@ int main(int ac, char **av)
 				break;
 			case 'I':
 				corrupt_item = 1;
+				break;
 			case 'd':
 				delete = 1;
 				break;
