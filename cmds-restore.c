@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 
 #include "kerncompat.h"
 
@@ -41,7 +39,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "volumes.h"
 #include "utils.h"
 #include "commands.h"
@@ -199,7 +196,7 @@ again:
 			reada_for_search(root, path, level, slot, 0);
 
 		next = read_node_slot(root, c, slot);
-		if (next)
+		if (extent_buffer_uptodate(next))
 			break;
 		offset++;
 	}
@@ -215,7 +212,7 @@ again:
 		if (path->reada)
 			reada_for_search(root, path, level, 0, 0);
 		next = read_node_slot(root, next, 0);
-		if (!next)
+		if (!extent_buffer_uptodate(next))
 			goto again;
 	}
 	return 0;
@@ -1122,12 +1119,6 @@ out:
 	return ret;
 }
 
-static struct option long_options[] = {
-	{ "path-regex", 1, NULL, 256},
-	{ "dry-run", 0, NULL, 'D'},
-	{ NULL, 0, NULL, 0}
-};
-
 const char * const cmd_restore_usage[] = {
 	"btrfs restore [options] <device> <path> | -l <device>",
 	"Try to restore files from a damaged filesystem (unmounted)",
@@ -1162,8 +1153,6 @@ int cmd_restore(int argc, char **argv)
 	u64 root_objectid = 0;
 	int len;
 	int ret;
-	int opt;
-	int option_index = 0;
 	int super_mirror = 0;
 	int find_dir = 0;
 	int list_roots = 0;
@@ -1172,8 +1161,19 @@ int cmd_restore(int argc, char **argv)
 	regex_t match_reg, *mreg = NULL;
 	char reg_err[256];
 
-	while ((opt = getopt_long(argc, argv, "sxviot:u:df:r:lDc", long_options,
-					&option_index)) != -1) {
+	while (1) {
+		int opt;
+		int option_index = 0;
+		static const struct option long_options[] = {
+			{ "path-regex", 1, NULL, 256},
+			{ "dry-run", 0, NULL, 'D'},
+			{ NULL, 0, NULL, 0}
+		};
+
+		opt = getopt_long(argc, argv, "sxviot:u:df:r:lDc", long_options,
+					&option_index);
+		if (opt < 0)
+			break;
 
 		switch (opt) {
 			case 's':
@@ -1263,7 +1263,7 @@ int cmd_restore(int argc, char **argv)
 	if (fs_location != 0) {
 		free_extent_buffer(root->node);
 		root->node = read_tree_block(root, fs_location, root->leafsize, 0);
-		if (!root->node) {
+		if (!extent_buffer_uptodate(root->node)) {
 			fprintf(stderr, "Failed to read fs location\n");
 			ret = 1;
 			goto out;

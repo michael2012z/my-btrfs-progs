@@ -15,8 +15,6 @@
  * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 021110-1307, USA.
  */
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE
 
 #include <stdio.h>
 #include <stdio_ext.h>
@@ -38,7 +36,6 @@
 #include "transaction.h"
 #include "crc32c.h"
 #include "utils.h"
-#include "version.h"
 #include "btrfsck.h"
 #include "commands.h"
 

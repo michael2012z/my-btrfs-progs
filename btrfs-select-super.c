@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -29,13 +27,12 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "utils.h"
 
 static void print_usage(void)
 {
 	fprintf(stderr, "usage: btrfs-select-super -s number dev\n");
-	fprintf(stderr, "%s\n", BTRFS_BUILD_VERSION);
+	fprintf(stderr, "%s\n", PACKAGE_STRING);
 	exit(1);
 }
 

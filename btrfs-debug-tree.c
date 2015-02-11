@@ -26,7 +26,6 @@
 #include "disk-io.h"
 #include "print-tree.h"
 #include "transaction.h"
-#include "version.h"
 #include "utils.h"
 
 static int print_usage(void)
@@ -43,7 +42,7 @@ static int print_usage(void)
                     " only\n");
 	fprintf(stderr,
 		"\t-t tree_id : print only the tree with the given id\n");
-	fprintf(stderr, "%s\n", BTRFS_BUILD_VERSION);
+	fprintf(stderr, "%s\n", PACKAGE_STRING);
 	exit(1);
 }
 
@@ -70,6 +69,8 @@ static void print_extents(struct btrfs_root *root, struct extent_buffer *eb)
 					     btrfs_node_blockptr(eb, i),
 					     size,
 					     btrfs_node_ptr_generation(eb, i));
+		if (!extent_buffer_uptodate(next))
+			continue;
 		if (btrfs_is_leaf(next) &&
 		    btrfs_header_level(eb) != 1)
 			BUG();
@@ -205,7 +206,8 @@ int main(int ac, char **av)
 				      block_only,
 				      root->leafsize, 0);
 
-		if (leaf && btrfs_header_level(leaf) != 0) {
+		if (extent_buffer_uptodate(leaf) &&
+		    btrfs_header_level(leaf) != 0) {
 			free_extent_buffer(leaf);
 			leaf = NULL;
 		}
@@ -215,7 +217,7 @@ int main(int ac, char **av)
 					      block_only,
 					      root->nodesize, 0);
 		}
-		if (!leaf) {
+		if (!extent_buffer_uptodate(leaf)) {
 			fprintf(stderr, "failed to read %llu\n",
 				(unsigned long long)block_only);
 			goto close_root;
@@ -471,7 +473,7 @@ no_node:
 	uuidbuf[BTRFS_UUID_UNPARSED_SIZE - 1] = '\0';
 	uuid_unparse(info->super_copy->fsid, uuidbuf);
 	printf("uuid %s\n", uuidbuf);
-	printf("%s\n", BTRFS_BUILD_VERSION);
+	printf("%s\n", PACKAGE_STRING);
 close_root:
 	return close_ctree(root);
 }

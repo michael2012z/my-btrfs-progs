@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -30,7 +28,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "volumes.h"
 #include "utils.h"
 #include "crc32c.h"

@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +31,6 @@
 #include "disk-io.h"
 #include "transaction.h"
 #include "utils.h"
-#include "version.h"
 #include "volumes.h"
 #include "extent_io.h"
 
@@ -910,7 +907,7 @@ static int flush_pending(struct metadump_struct *md, int done)
 		while (!md->data && size > 0) {
 			u64 this_read = min(blocksize, size);
 			eb = read_tree_block(md->root, start, this_read, 0);
-			if (!eb) {
+			if (!extent_buffer_uptodate(eb)) {
 				free(async->buffer);
 				free(async);
 				fprintf(stderr,
@@ -1039,7 +1036,7 @@ static int copy_tree_blocks(struct btrfs_root *root, struct extent_buffer *eb,
 			ri = btrfs_item_ptr(eb, i, struct btrfs_root_item);
 			bytenr = btrfs_disk_root_bytenr(eb, ri);
 			tmp = read_tree_block(root, bytenr, root->leafsize, 0);
-			if (!tmp) {
+			if (!extent_buffer_uptodate(tmp)) {
 				fprintf(stderr,
 					"Error reading log root block\n");
 				return -EIO;
@@ -1051,7 +1048,7 @@ static int copy_tree_blocks(struct btrfs_root *root, struct extent_buffer *eb,
 		} else {
 			bytenr = btrfs_node_blockptr(eb, i);
 			tmp = read_tree_block(root, bytenr, root->leafsize, 0);
-			if (!tmp) {
+			if (!extent_buffer_uptodate(tmp)) {
 				fprintf(stderr, "Error reading log block\n");
 				return -EIO;
 			}
@@ -2466,6 +2463,9 @@ static void print_usage(void)
 	fprintf(stderr, "\t-s      \tsanitize file names, use once to just use garbage, use twice if you want crc collisions\n");
 	fprintf(stderr, "\t-w      \twalk all trees instead of using extent tree, do this if your extent tree is broken\n");
 	fprintf(stderr, "\t-m	   \trestore for multiple devices\n");
+	fprintf(stderr, "\n");
+	fprintf(stderr, "\tIn the dump mode, source is the btrfs device and target is the output file (use '-' for stdout).\n");
+	fprintf(stderr, "\tIn the restore mode, source is the dumped image and target is the btrfs device/file.\n");
 	exit(1);
 }
 
