@@ -21,6 +21,7 @@
 #include "ctree.h"
 #include "ioctl.h"
 #include "utils.h"
+#include <errno.h>
 
 #define BTRFS_QGROUP_NFILTERS_INCREASE (2 * BTRFS_QGROUP_FILTER_MAX)
 #define BTRFS_QGROUP_NCOMPS_INCREASE (2 * BTRFS_QGROUP_COMP_MAX)
@@ -171,8 +172,9 @@ static int print_parent_column(struct btrfs_qgroup *qgroup)
 	int len = 0;
 
 	list_for_each_entry(list, &qgroup->qgroups, next_qgroup) {
-		len += printf("%llu/%llu", (list->qgroup)->qgroupid >> 48,
-			((1ll << 48) - 1) & (list->qgroup)->qgroupid);
+		len += printf("%llu/%llu",
+			      btrfs_qgroup_level(list->qgroup->qgroupid),
+			      btrfs_qgroup_subvid(list->qgroup->qgroupid));
 		if (!list_is_last(&list->next_qgroup, &qgroup->qgroups))
 			len += printf(",");
 	}
@@ -188,8 +190,9 @@ static int print_child_column(struct btrfs_qgroup *qgroup)
 	int len = 0;
 
 	list_for_each_entry(list, &qgroup->members, next_member) {
-		len += printf("%llu/%llu", (list->member)->qgroupid >> 48,
-				((1ll << 48) - 1) & (list->member)->qgroupid);
+		len += printf("%llu/%llu",
+			      btrfs_qgroup_level(list->member->qgroupid),
+			      btrfs_qgroup_subvid(list->member->qgroupid));
 		if (!list_is_last(&list->next_member, &qgroup->members))
 			len += printf(",");
 	}
@@ -218,8 +221,9 @@ static void print_qgroup_column(struct btrfs_qgroup *qgroup,
 	switch (column) {
 
 	case BTRFS_QGROUP_QGROUPID:
-		len = printf("%llu/%llu", qgroup->qgroupid >> 48,
-				((1ll << 48) - 1) & qgroup->qgroupid);
+		len = printf("%llu/%llu",
+			     btrfs_qgroup_level(qgroup->qgroupid),
+			     btrfs_qgroup_subvid(qgroup->qgroupid));
 		print_qgroup_column_add_blank(BTRFS_QGROUP_QGROUPID, len);
 		break;
 	case BTRFS_QGROUP_RFER:
@@ -920,8 +924,9 @@ static void __update_columns_max_len(struct btrfs_qgroup *bq,
 	switch (column) {
 
 	case BTRFS_QGROUP_QGROUPID:
-		sprintf(tmp, "%llu/%llu", (bq->qgroupid >> 48),
-			bq->qgroupid & ((1ll << 48) - 1));
+		sprintf(tmp, "%llu/%llu",
+			btrfs_qgroup_level(bq->qgroupid),
+			btrfs_qgroup_subvid(bq->qgroupid));
 		len = strlen(tmp);
 		if (btrfs_qgroup_columns[column].max_len < len)
 			btrfs_qgroup_columns[column].max_len = len;
@@ -950,8 +955,8 @@ static void __update_columns_max_len(struct btrfs_qgroup *bq,
 		len = 0;
 		list_for_each_entry(list, &bq->qgroups, next_qgroup) {
 			len += sprintf(tmp, "%llu/%llu",
-				(list->qgroup)->qgroupid >> 48,
-				((1ll << 48) - 1) & (list->qgroup)->qgroupid);
+				btrfs_qgroup_level(list->qgroup->qgroupid),
+				btrfs_qgroup_subvid(list->qgroup->qgroupid));
 			if (!list_is_last(&list->next_qgroup, &bq->qgroups))
 				len += 1;
 		}
@@ -962,8 +967,8 @@ static void __update_columns_max_len(struct btrfs_qgroup *bq,
 		len = 0;
 		list_for_each_entry(list, &bq->members, next_member) {
 			len += sprintf(tmp, "%llu/%llu",
-				(list->member)->qgroupid >> 48,
-				((1ll << 48) - 1) & (list->member)->qgroupid);
+				btrfs_qgroup_level(list->member->qgroupid),
+				btrfs_qgroup_subvid(list->member->qgroupid));
 			if (!list_is_last(&list->next_member, &bq->members))
 				len += 1;
 		}
@@ -1012,6 +1017,20 @@ static void __filter_and_sort_qgroups(struct qgroup_lookup *all_qgroups,
 		n = rb_prev(n);
 	}
 }
+
+static inline void print_status_flag_warning(u64 flags)
+{
+	if (!(flags & BTRFS_QGROUP_STATUS_FLAG_ON))
+		fprintf(stderr,
+		"WARNING: Quota disabled, qgroup data may be out of date\n");
+	else if (flags & BTRFS_QGROUP_STATUS_FLAG_RESCAN)
+		fprintf(stderr,
+		"WARNING: Rescan is running, qgroup data may be incorrect\n");
+	else if (flags & BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT)
+		fprintf(stderr,
+		"WARNING: Qgroup data inconsistent, rescan recommended\n");
+}
+
 static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 {
 	int ret;
@@ -1035,7 +1054,7 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 
 	sk->tree_id = BTRFS_QUOTA_TREE_OBJECTID;
 	sk->max_type = BTRFS_QGROUP_RELATION_KEY;
-	sk->min_type = BTRFS_QGROUP_INFO_KEY;
+	sk->min_type = BTRFS_QGROUP_STATUS_KEY;
 	sk->max_objectid = (u64)-1;
 	sk->max_offset = (u64)-1;
 	sk->max_transid = (u64)-1;
@@ -1066,7 +1085,15 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 								  off);
 			off += sizeof(*sh);
 
-			if (sh->type == BTRFS_QGROUP_INFO_KEY) {
+			if (sh->type == BTRFS_QGROUP_STATUS_KEY) {
+				struct btrfs_qgroup_status_item *si;
+				u64 flags;
+
+				si = (struct btrfs_qgroup_status_item *)
+				     (args.buf + off);
+				flags = btrfs_stack_qgroup_status_flags(si);
+				print_status_flag_warning(flags);
+			} else if (sh->type == BTRFS_QGROUP_INFO_KEY) {
 				info = (struct btrfs_qgroup_info_item *)
 				       (args.buf + off);
 				a1 = btrfs_stack_qgroup_info_generation(info);
@@ -1244,34 +1271,6 @@ int btrfs_qgroup_parse_sort_string(char *opt_arg,
 	return 0;
 }
 
-u64 parse_qgroupid(char *p)
-{
-	char *s = strchr(p, '/');
-	char *ptr_src_end = p + strlen(p);
-	char *ptr_parse_end = NULL;
-	u64 level;
-	u64 id;
-
-	if (!s) {
-		id = strtoull(p, &ptr_parse_end, 10);
-		if (ptr_parse_end != ptr_src_end)
-			goto err;
-		return id;
-	}
-	level = strtoull(p, &ptr_parse_end, 10);
-	if (ptr_parse_end != s)
-		goto err;
-
-	id = strtoull(s+1, &ptr_parse_end, 10);
-	if (ptr_parse_end != ptr_src_end)
-		goto  err;
-
-	return (level << 48) | id;
-err:
-	fprintf(stderr, "ERROR:invalid qgroupid\n");
-	exit(-1);
-}
-
 int qgroup_inherit_size(struct btrfs_qgroup_inherit *p)
 {
 	return sizeof(*p) + sizeof(p->qgroups[0]) *
@@ -1294,7 +1293,7 @@ qgroup_inherit_realloc(struct btrfs_qgroup_inherit **inherit, int n, int pos)
 	out = calloc(sizeof(*out) + sizeof(out->qgroups[0]) * (nitems + n), 1);
 	if (out == NULL) {
 		fprintf(stderr, "ERROR: Not enough memory\n");
-		return 13;
+		return -ENOMEM;
 	}
 
 	if (*inherit) {
@@ -1322,7 +1321,7 @@ int qgroup_inherit_add_group(struct btrfs_qgroup_inherit **inherit, char *arg)
 
 	if (qgroupid == 0) {
 		fprintf(stderr, "ERROR: bad qgroup specification\n");
-		return 12;
+		return -EINVAL;
 	}
 
 	if (*inherit)
@@ -1349,7 +1348,7 @@ int qgroup_inherit_add_copy(struct btrfs_qgroup_inherit **inherit, char *arg,
 	if (!p) {
 bad:
 		fprintf(stderr, "ERROR: bad copy specification\n");
-		return 12;
+		return -EINVAL;
 	}
 	*p = 0;
 	qgroup_src = parse_qgroupid(arg);

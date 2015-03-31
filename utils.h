@@ -25,6 +25,7 @@
 
 #define BTRFS_MKFS_SYSTEM_GROUP_SIZE (4 * 1024 * 1024)
 #define BTRFS_MKFS_SMALL_VOLUME_SIZE (1024 * 1024 * 1024)
+#define BTRFS_MKFS_DEFAULT_NODE_SIZE 16384
 
 #define BTRFS_SCAN_MOUNTED	(1ULL << 0)
 #define BTRFS_SCAN_LBLKID	(1ULL << 1)
@@ -113,6 +114,7 @@ int pretty_size_snprintf(u64 size, char *str, size_t str_bytes, unsigned unit_mo
 int get_mountpt(char *dev, char *mntpt, size_t size);
 int btrfs_scan_block_devices(int run_ioctl);
 u64 parse_size(char *s);
+u64 parse_qgroupid(const char *p);
 u64 arg_strtou64(const char *str);
 int open_file_or_dir(const char *fname, DIR **dirstream);
 int open_file_or_dir3(const char *fname, DIR **dirstream, int open_flags);
@@ -208,5 +210,6 @@ static inline u64 div_factor(u64 num, int factor)
 }
 
 int btrfs_tree_search2_ioctl_supported(int fd);
+int btrfs_check_node_or_leaf_size(u32 size, u32 sectorsize);
 
 #endif

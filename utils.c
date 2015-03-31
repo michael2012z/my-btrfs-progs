@@ -1708,6 +1708,25 @@ scan_again:
 }
 
 /*
+ * Unsafe subvolume check.
+ *
+ * This only checks ino == BTRFS_FIRST_FREE_OBJECTID, even it is not in a
+ * btrfs mount point.
+ * Must use together with other reliable method like btrfs ioctl.
+ */
+static int __is_subvol(const char *path)
+{
+	struct stat st;
+	int ret;
+
+	ret = lstat(path, &st);
+	if (ret < 0)
+		return ret;
+
+	return st.st_ino == BTRFS_FIRST_FREE_OBJECTID;
+}
+
+/*
  * A not-so-good version fls64. No fascinating optimization since
  * no one except parse_size use it
  */
@@ -1793,6 +1812,55 @@ u64 parse_size(char *s)
 	}
 	ret *= mult;
 	return ret;
+}
+
+u64 parse_qgroupid(const char *p)
+{
+	char *s = strchr(p, '/');
+	const char *ptr_src_end = p + strlen(p);
+	char *ptr_parse_end = NULL;
+	u64 level;
+	u64 id;
+	int fd;
+	int ret = 0;
+
+	if (p[0] == '/')
+		goto path;
+
+	/* Numeric format like '0/257' is the primary case */
+	if (!s) {
+		id = strtoull(p, &ptr_parse_end, 10);
+		if (ptr_parse_end != ptr_src_end)
+			goto path;
+		return id;
+	}
+	level = strtoull(p, &ptr_parse_end, 10);
+	if (ptr_parse_end != s)
+		goto path;
+
+	id = strtoull(s + 1, &ptr_parse_end, 10);
+	if (ptr_parse_end != ptr_src_end)
+		goto  path;
+
+	return (level << BTRFS_QGROUP_LEVEL_SHIFT) | id;
+
+path:
+	/* Path format like subv at 'my_subvol' is the fallback case */
+	ret = __is_subvol(p);
+	if (ret < 0 || !ret)
+		goto err;
+	fd = open(p, O_RDONLY);
+	if (fd < 0)
+		goto err;
+	ret = lookup_ino_rootid(fd, &id);
+	close(fd);
+	if (ret < 0)
+		goto err;
+	return id;
+
+err:
+	fprintf(stderr, "ERROR: invalid qgroupid or subvolume path: %s\n", p);
+	exit(-1);
 }
 
 int open_file_or_dir3(const char *fname, DIR **dirstream, int open_flags)
@@ -2719,4 +2787,25 @@ int btrfs_tree_search2_ioctl_supported(int fd)
 		return ret;
 
 	return v2_supported;
+}
+
+int btrfs_check_node_or_leaf_size(u32 size, u32 sectorsize)
+{
+	if (size < sectorsize) {
+		fprintf(stderr,
+			"ERROR: Illegal nodesize (or leafsize) %u (smaller than %u)\n",
+			size, sectorsize);
+		return -1;
+	} else if (size > BTRFS_MAX_METADATA_BLOCKSIZE) {
+		fprintf(stderr,
+			"ERROR: Illegal nodesize (or leafsize) %u (larger than %u)\n",
+			size, BTRFS_MAX_METADATA_BLOCKSIZE);
+		return -1;
+	} else if (size & (sectorsize - 1)) {
+		fprintf(stderr,
+			"ERROR: Illegal nodesize (or leafsize) %u (not aligned to %u)\n",
+			size, sectorsize);
+		return -1;
+	}
+	return 0;
 }

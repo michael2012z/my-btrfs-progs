@@ -22,6 +22,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <uuid/uuid.h>
 #include "kerncompat.h"
 #include "radix-tree.h"
 #include "ctree.h"
@@ -33,17 +34,18 @@
 #include "print-tree.h"
 #include "rbtree-utils.h"
 
+/* specified errno for check_tree_block */
+#define BTRFS_BAD_BYTENR		(-1)
+#define BTRFS_BAD_FSID			(-2)
+
 static int check_tree_block(struct btrfs_root *root, struct extent_buffer *buf)
 {
 
 	struct btrfs_fs_devices *fs_devices;
-	int ret = 1;
+	int ret = BTRFS_BAD_FSID;
 
-	if (buf->start != btrfs_header_bytenr(buf)) {
-		printk("Check tree block failed, want=%Lu, have=%Lu\n",
-		       buf->start, btrfs_header_bytenr(buf));
-		return ret;
-	}
+	if (buf->start != btrfs_header_bytenr(buf))
+		return BTRFS_BAD_BYTENR;
 
 	fs_devices = root->fs_info->fs_devices;
 	while (fs_devices) {
@@ -56,6 +58,30 @@ static int check_tree_block(struct btrfs_root *root, struct extent_buffer *buf)
 		fs_devices = fs_devices->seed;
 	}
 	return ret;
+}
+
+static void print_tree_block_error(struct btrfs_root *root,
+				struct extent_buffer *eb,
+				int err)
+{
+	char fs_uuid[BTRFS_UUID_UNPARSED_SIZE] = {'\0'};
+	char found_uuid[BTRFS_UUID_UNPARSED_SIZE] = {'\0'};
+	u8 buf[BTRFS_UUID_SIZE];
+
+	switch (err) {
+	case BTRFS_BAD_FSID:
+		read_extent_buffer(eb, buf, btrfs_header_fsid(),
+				   BTRFS_UUID_SIZE);
+		uuid_unparse(buf, found_uuid);
+		uuid_unparse(root->fs_info->fsid, fs_uuid);
+		fprintf(stderr, "fsid mismatch, want=%s, have=%s\n",
+			fs_uuid, found_uuid);
+		break;
+	case BTRFS_BAD_BYTENR:
+		fprintf(stderr, "bytenr mismatch, want=%llu, have=%llu\n",
+			eb->start, btrfs_header_bytenr(eb));
+		break;
+	}
 }
 
 u32 btrfs_csum_data(struct btrfs_root *root, char *data, u32 seed, size_t len)
@@ -115,6 +141,8 @@ int csum_tree_block(struct btrfs_root *root, struct extent_buffer *buf,
 {
 	u16 csum_size =
 		btrfs_super_csum_size(root->fs_info->super_copy);
+	if (verify && root->fs_info->suppress_check_block_errors)
+		return verify_tree_block_csum_silent(buf, csum_size);
 	return csum_tree_block_size(buf, csum_size, verify);
 }
 
@@ -265,8 +293,8 @@ struct extent_buffer *read_tree_block(struct btrfs_root *root, u64 bytenr,
 
 	while (1) {
 		ret = read_whole_eb(root->fs_info, eb, mirror_num);
-		if (ret == 0 && check_tree_block(root, eb) == 0 &&
-		    csum_tree_block(root, eb, 1) == 0 &&
+		if (ret == 0 && csum_tree_block(root, eb, 1) == 0 &&
+		    check_tree_block(root, eb) == 0 &&
 		    verify_parent_transid(eb->tree, eb, parent_transid, ignore)
 		    == 0) {
 			if (eb->flags & EXTENT_BAD_TRANSID &&
@@ -279,10 +307,14 @@ struct extent_buffer *read_tree_block(struct btrfs_root *root, u64 bytenr,
 			return eb;
 		}
 		if (ignore) {
-			if (check_tree_block(root, eb))
-				printk("read block failed check_tree_block\n");
-			else
-				printk("Csum didn't match\n");
+			if (check_tree_block(root, eb)) {
+				if (!root->fs_info->suppress_check_block_errors)
+					print_tree_block_error(root, eb,
+						check_tree_block(root, eb));
+			} else {
+				if (!root->fs_info->suppress_check_block_errors)
+					fprintf(stderr, "Csum didn't match\n");
+			}
 			ret = -EIO;
 			break;
 		}
@@ -343,8 +375,10 @@ static int write_tree_block(struct btrfs_trans_handle *trans,
 		     struct btrfs_root *root,
 		     struct extent_buffer *eb)
 {
-	if (check_tree_block(root, eb))
+	if (check_tree_block(root, eb)) {
+		print_tree_block_error(root, eb, check_tree_block(root, eb));
 		BUG();
+	}
 
 	if (!btrfs_buffer_uptodate(eb, trans->transid))
 		BUG();
@@ -763,6 +797,8 @@ struct btrfs_fs_info *btrfs_new_fs_info(int writable, u64 sb_bytenr)
 	extent_io_tree_init(&fs_info->pinned_extents);
 	extent_io_tree_init(&fs_info->pending_del);
 	extent_io_tree_init(&fs_info->extent_ins);
+	fs_info->excluded_extents = NULL;
+
 	fs_info->fs_root_tree = RB_ROOT;
 	cache_tree_init(&fs_info->mapping_tree.cache_tree);
 
@@ -1004,7 +1040,8 @@ void btrfs_cleanup_all_caches(struct btrfs_fs_info *fs_info)
 
 int btrfs_scan_fs_devices(int fd, const char *path,
 			  struct btrfs_fs_devices **fs_devices,
-			  u64 sb_bytenr, int super_recover)
+			  u64 sb_bytenr, int super_recover,
+			  int skip_devices)
 {
 	u64 total_devs;
 	u64 dev_size;
@@ -1031,7 +1068,7 @@ int btrfs_scan_fs_devices(int fd, const char *path,
 		return ret;
 	}
 
-	if (total_devs != 1) {
+	if (!skip_devices && total_devs != 1) {
 		ret = btrfs_scan_lblkid();
 		if (ret)
 			return ret;
@@ -1110,9 +1147,12 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 	}
 	if (flags & OPEN_CTREE_RESTORE)
 		fs_info->on_restoring = 1;
+	if (flags & OPEN_CTREE_SUPPRESS_CHECK_BLOCK_ERRORS)
+		fs_info->suppress_check_block_errors = 1;
 
 	ret = btrfs_scan_fs_devices(fp, path, &fs_devices, sb_bytenr,
-				    (flags & OPEN_CTREE_RECOVER_SUPER));
+				    (flags & OPEN_CTREE_RECOVER_SUPER),
+				    (flags & OPEN_CTREE_NO_DEVICES));
 	if (ret)
 		goto out;
 
@@ -1157,7 +1197,7 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 			   BTRFS_UUID_SIZE);
 
 	ret = btrfs_setup_all_roots(fs_info, root_tree_bytenr, flags);
-	if (ret)
+	if (ret && !(flags & __OPEN_CTREE_RETURN_CHUNK_ROOT))
 		goto out_chunk;
 
 	return fs_info;
@@ -1202,6 +1242,8 @@ struct btrfs_root *open_ctree(const char *filename, u64 sb_bytenr,
 	info = open_ctree_fs_info(filename, sb_bytenr, 0, flags);
 	if (!info)
 		return NULL;
+	if (flags & __OPEN_CTREE_RETURN_CHUNK_ROOT)
+		return info->chunk_root;
 	return info->fs_root;
 }
 
@@ -1212,6 +1254,8 @@ struct btrfs_root *open_ctree_fd(int fp, const char *path, u64 sb_bytenr,
 	info = __open_ctree_fd(fp, path, sb_bytenr, 0, flags);
 	if (!info)
 		return NULL;
+	if (flags & __OPEN_CTREE_RETURN_CHUNK_ROOT)
+		return info->chunk_root;
 	return info->fs_root;
 }
 

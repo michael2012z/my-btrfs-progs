@@ -3,6 +3,10 @@ AC_INIT([btrfs-progs],
 	[linux-btrfs@vger.kernel.org],,
 	[http://btrfs.wiki.kernel.org])
 
+if test "x$PACKAGE_URL" = "x"; then
+	AC_DEFINE([PACKAGE_URL], ["http://btrfs.wiki.kernel.org"], [URL])
+fi
+
 dnl library version
 LIBBTRFS_MAJOR=0
 LIBBTRFS_MINOR=1
@@ -94,13 +98,13 @@ fi
 
 AC_ARG_ENABLE([convert],
 	      AS_HELP_STRING([--disable-convert], [do not build btrfs-convert]),
-  [], [enable_btrfsconvert=yes]
+  [], [enable_convert=yes]
 )
 
-AS_IF([test "x$enable_btrfsconvert" = xyes], [DISABLE_BTRFSCONVERT=0], [DISABLE_BTRFSCONVERT=1])
+AS_IF([test "x$enable_convert" = xyes], [DISABLE_BTRFSCONVERT=0], [DISABLE_BTRFSCONVERT=1])
 AC_SUBST([DISABLE_BTRFSCONVERT])
 
-if test "x$enable_btrfsconvert" = xyes; then
+if test "x$enable_convert" = xyes; then
 	PKG_CHECK_MODULES(EXT2FS, [ext2fs])
 	PKG_CHECK_MODULES(COM_ERR, [com_err])
 fi
@@ -163,7 +167,7 @@ AC_MSG_RESULT([
 
 	documentaton:      ${enable_documentation}
 	backtrace support: ${enable_backtrace}
-	btrfs-convert:     ${enable_btrfsconvert}
+	btrfs-convert:     ${enable_convert}
 
 	Type 'make' to compile.
 ])

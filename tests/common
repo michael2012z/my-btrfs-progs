@@ -9,6 +9,12 @@ _fail()
 	exit 1
 }
 
+_not_run()
+{
+	echo "    [NOTRUN] $*"
+	exit 0
+}
+
 run_check()
 {
 	echo "############### $@" >> $RESULT 2>&1
@@ -51,14 +57,45 @@ check_all_images()
 # some tests need to mount the recovered image and do verifications call
 # 'setup_root_helper' and then check for have_root_helper == 1 if the test
 # needs to fail otherwise; using sudo by default for now
-sudo=
-have_root_helper=0
-export sudo
-export have_root_helper
+SUDO_HELPER=
+NEED_SUDO_VALIDATE=unknown
+export SUDO_HELPER
+export NEED_SUDO_VALIDATE
+root_helper()
+{
+	if [ $UID -eq 0 ]; then
+		"$@"
+	else
+		if [ "$NEED_SUDO_VALIDATE" = 'yes' ]; then
+			sudo -v -n &>/dev/null || \
+				_not_run "Need to validate sudo credentials"
+			sudo -n "$@"
+		elif [ "$NEED_SUDO_VALIDATE" = 'no' ]; then
+			sudo -n /bin/true &> /dev/null || \
+				_not_run "Need to validate sudo user settings"
+			sudo -n "$@"
+		else
+			# should not happen
+			_not_run "Need to validate root privileges"
+		fi
+	fi
+}
+
 setup_root_helper()
 {
-	if [ $UID != 0 ]; then
-		sudo="sudo --non-interactive"
+	if [ $UID -eq 0 ]; then
+		return
 	fi
-	have_root_helper=1
+
+	# Test for old sudo or special settings, which make sudo -v fail even
+	# if user setting is NOPASSWD
+	sudo -n /bin/true &>/dev/null && NEED_SUDO_VALIDATE=no
+
+	# Newer sudo or default sudo setting
+	sudo -v -n &>/dev/null && NEED_SUDO_VALIDATE=yes
+
+	if [ "$NEED_SUDO_VALIDATE" = 'unknown' ]; then
+		_not_run "Need to validate root privileges"
+	fi
+	SUDO_HELPER=root_helper
 }

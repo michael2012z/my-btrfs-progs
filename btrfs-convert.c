@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <uuid/uuid.h>
 #include <linux/limits.h>
+#include <getopt.h>
 
 #include "ctree.h"
 #include "disk-io.h"
@@ -140,10 +141,36 @@ static int ext2_alloc_block(ext2_filsys fs, u64 goal, u64 *block_ret)
 	return -ENOSPC;
 }
 
+static int ext2_alloc_block_range(ext2_filsys fs, u64 goal, int num,
+		u64 *block_ret)
+{
+	blk_t block;
+	ext2fs_block_bitmap bitmap = fs->block_map;
+	blk_t start = ext2fs_get_block_bitmap_start(bitmap);
+	blk_t end = ext2fs_get_block_bitmap_end(bitmap);
+
+	for (block = max_t(u64, goal, start); block + num < end; block++) {
+		if (ext2fs_fast_test_block_bitmap_range(bitmap, block, num)) {
+			ext2fs_fast_mark_block_bitmap_range(bitmap, block,
+					num);
+			*block_ret = block;
+			return 0;
+		}
+	}
+	return -ENOSPC;
+}
+
 static int ext2_free_block(ext2_filsys fs, u64 block)
 {
 	BUG_ON(block != (blk_t)block);
 	ext2fs_fast_unmark_block_bitmap(fs->block_map, block);
+	return 0;
+}
+
+static int ext2_free_block_range(ext2_filsys fs, u64 block, int num)
+{
+	BUG_ON(block != (blk_t)block);
+	ext2fs_fast_unmark_block_bitmap_range(fs->block_map, block, num);
 	return 0;
 }
 
@@ -2232,9 +2259,9 @@ err:
 }
 
 static int do_convert(const char *devname, int datacsum, int packing, int noxattr,
-	       int copylabel, const char *fslabel, int progress)
+		u32 nodesize, int copylabel, const char *fslabel, int progress)
 {
-	int i, ret;
+	int i, ret, blocks_per_node;
 	int fd = -1;
 	u32 blocksize;
 	u64 blocks[7];
@@ -2261,8 +2288,17 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		fprintf(stderr, "filetype feature is missing\n");
 		goto fail;
 	}
+	if (btrfs_check_node_or_leaf_size(nodesize, blocksize))
+		goto fail;
+	blocks_per_node = nodesize / blocksize;
+	ret = -blocks_per_node;
 	for (i = 0; i < 7; i++) {
-		ret = ext2_alloc_block(ext2_fs, 0, blocks + i);
+		if (nodesize == blocksize)
+			ret = ext2_alloc_block(ext2_fs, 0, blocks + i);
+		else
+			ret = ext2_alloc_block_range(ext2_fs,
+					ret + blocks_per_node, blocks_per_node,
+					blocks + i);
 		if (ret) {
 			fprintf(stderr, "not enough free space\n");
 			goto fail;
@@ -2276,7 +2312,7 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		goto fail;
 	}
 	ret = make_btrfs(fd, devname, ext2_fs->super->s_volume_name,
-			 NULL, blocks, total_bytes, blocksize, blocksize,
+			 NULL, blocks, total_bytes, nodesize, nodesize,
 			 blocksize, blocksize, 0);
 	if (ret) {
 		fprintf(stderr, "unable to create initial ctree: %s\n",
@@ -2303,7 +2339,11 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 	/* recover block allocation bitmap */
 	for (i = 0; i < 7; i++) {
 		blocks[i] /= blocksize;
-		ext2_free_block(ext2_fs, blocks[i]);
+		if (nodesize == blocksize)
+			ext2_free_block(ext2_fs, blocks[i]);
+		else
+			ext2_free_block_range(ext2_fs, blocks[i],
+					blocks_per_node);
 	}
 	ret = init_btrfs(root);
 	if (ret) {
@@ -2759,14 +2799,17 @@ fail:
 
 static void print_usage(void)
 {
-	printf("usage: btrfs-convert [-d] [-i] [-n] [-r] [-l label] [-L] device\n");
-	printf("\t-d           disable data checksum\n");
-	printf("\t-i           ignore xattrs and ACLs\n");
-	printf("\t-n           disable packing of small files\n");
-	printf("\t-r           roll back to ext2fs\n");
-	printf("\t-l LABEL     set filesystem label\n");
-	printf("\t-L           use label from converted fs\n");
-	printf("\t-p           show converting progress\n");
+	printf("usage: btrfs-convert [options] device\n");
+	printf("options:\n");
+	printf("\t-d|--no-datasum        disable data checksum, sets NODATASUM\n");
+	printf("\t-i|--no-xattr          ignore xattrs and ACLs\n");
+	printf("\t-n|--no-inline         disable inlining of small files to metadata\n");
+	printf("\t-N|--nodesize SIZE     set filesystem metadata nodesize\n");
+	printf("\t-r|--rollback          roll back to ext2fs\n");
+	printf("\t-l|--label LABEL       set filesystem label\n");
+	printf("\t-L|--copy-label        use label from converted filesystem\n");
+	printf("\t-p|--progress          show converting progress (default)\n");
+	printf("\t--no-progress          show only overview, not the detailed progress\n");
 }
 
 int main(int argc, char *argv[])
@@ -2775,15 +2818,34 @@ int main(int argc, char *argv[])
 	int packing = 1;
 	int noxattr = 0;
 	int datacsum = 1;
+	u32 nodesize = max_t(u32, sysconf(_SC_PAGESIZE),
+			BTRFS_MKFS_DEFAULT_NODE_SIZE);
 	int rollback = 0;
 	int copylabel = 0;
 	int usage_error = 0;
-	int progress = 0;
+	int progress = 1;
 	char *file;
 	char *fslabel = NULL;
 
 	while(1) {
-		int c = getopt(argc, argv, "dinrl:Lp");
+		int long_index;
+		enum { GETOPT_VAL_NO_PROGRESS = 256 };
+		static const struct option long_options[] = {
+			{ "no-progress", no_argument, NULL,
+				GETOPT_VAL_NO_PROGRESS },
+			{ "no-datasum", no_argument, NULL, 'd' },
+			{ "no-inline", no_argument, NULL, 'n' },
+			{ "no-xattr", no_argument, NULL, 'i' },
+			{ "rollback", no_argument, NULL, 'r' },
+			{ "progress", no_argument, NULL, 'p' },
+			{ "label", required_argument, NULL, 'l' },
+			{ "copy-label", no_argument, NULL, 'L' },
+			{ "nodesize", required_argument, NULL, 'N' },
+			{ NULL, 0, NULL, 0 }
+		};
+		int c = getopt_long(argc, argv, "dinN:rl:Lp", long_options,
+				&long_index);
+
 		if (c < 0)
 			break;
 		switch(c) {
@@ -2795,6 +2857,9 @@ int main(int argc, char *argv[])
 				break;
 			case 'n':
 				packing = 0;
+				break;
+			case 'N':
+				nodesize = parse_size(optarg);
 				break;
 			case 'r':
 				rollback = 1;
@@ -2814,6 +2879,9 @@ int main(int argc, char *argv[])
 				break;
 			case 'p':
 				progress = 1;
+				break;
+			case GETOPT_VAL_NO_PROGRESS:
+				progress = 0;
 				break;
 			default:
 				print_usage();
@@ -2852,7 +2920,8 @@ int main(int argc, char *argv[])
 	if (rollback) {
 		ret = do_rollback(file);
 	} else {
-		ret = do_convert(file, datacsum, packing, noxattr, copylabel, fslabel, progress);
+		ret = do_convert(file, datacsum, packing, noxattr, nodesize,
+				copylabel, fslabel, progress);
 	}
 	if (ret)
 		return 1;

@@ -223,6 +223,7 @@ int main(int ac, char **av)
 			goto close_root;
 		}
 		btrfs_print_tree(root, leaf, 0);
+		free_extent_buffer(leaf);
 		goto close_root;
 	}
 
@@ -299,8 +300,10 @@ again:
 					      0);
 			if (!extent_buffer_uptodate(buf))
 				goto next;
-			if (tree_id && found_key.objectid != tree_id)
+			if (tree_id && found_key.objectid != tree_id) {
+				free_extent_buffer(buf);
 				goto next;
+			}
 
 			switch(found_key.objectid) {
 			case BTRFS_ROOT_TREE_OBJECTID:

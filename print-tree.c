@@ -203,6 +203,20 @@ static void bg_flags_to_str(u64 flags, char *ret)
 	}
 }
 
+/* Caller should ensure sizeof(*ret)>= 26 "OFF|SCANNING|INCONSISTENT" */
+static void qgroup_flags_to_str(u64 flags, char *ret)
+{
+	if (flags & BTRFS_QGROUP_STATUS_FLAG_ON)
+		strcpy(ret, "ON");
+	else
+		strcpy(ret, "OFF");
+
+	if (flags & BTRFS_QGROUP_STATUS_FLAG_RESCAN)
+		strcat(ret, "|SCANNING");
+	if (flags & BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT)
+		strcat(ret, "|INCONSISTENT");
+}
+
 void print_chunk(struct extent_buffer *eb, struct btrfs_chunk *chunk)
 {
 	int num_stripes = btrfs_chunk_num_stripes(eb, chunk);
@@ -311,6 +325,10 @@ static void extent_flags_to_str(u64 flags, char *ret)
 			strcat(ret, "|");
 		}
 		strcat(ret, "TREE_BLOCK");
+	}
+	if (flags & BTRFS_BLOCK_FLAG_FULL_BACKREF) {
+		strcat(ret, "|");
+		strcat(ret, "FULL_BACKREF");
 	}
 }
 
@@ -641,8 +659,8 @@ static void print_objectid(u64 objectid, u8 type)
 		printf("%llu", (unsigned long long)objectid); /* device id */
 		return;
 	case BTRFS_QGROUP_RELATION_KEY:
-		printf("%llu/%llu", objectid >> 48,
-			objectid & ((1ll << 48) - 1));
+		printf("%llu/%llu", btrfs_qgroup_level(objectid),
+		       btrfs_qgroup_subvid(objectid));
 		return;
 	case BTRFS_UUID_KEY_SUBVOL:
 	case BTRFS_UUID_KEY_RECEIVED_SUBVOL:
@@ -739,8 +757,8 @@ void btrfs_print_key(struct btrfs_disk_key *disk_key)
 	case BTRFS_QGROUP_RELATION_KEY:
 	case BTRFS_QGROUP_INFO_KEY:
 	case BTRFS_QGROUP_LIMIT_KEY:
-		printf(" %llu/%llu)", (unsigned long long)(offset >> 48),
-			(unsigned long long)(offset & ((1ll << 48) - 1)));
+		printf(" %llu/%llu)", btrfs_qgroup_level(offset),
+		       btrfs_qgroup_subvid(offset));
 		break;
 	case BTRFS_UUID_KEY_SUBVOL:
 	case BTRFS_UUID_KEY_RECEIVED_SUBVOL:
@@ -797,7 +815,7 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 	u32 nr = btrfs_header_nritems(l);
 	u64 objectid;
 	u32 type;
-	char bg_flags_str[32];
+	char flags_str[32];
 
 	mdebuga("extent_buffer = 0x%x\n", (unsigned int)l);
 
@@ -918,13 +936,13 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 					    struct btrfs_block_group_item);
 			read_extent_buffer(l, &bg_item, (unsigned long)bi,
 					   sizeof(bg_item));
-			memset(bg_flags_str, 0, sizeof(bg_flags_str));
+			memset(flags_str, 0, sizeof(flags_str));
 			bg_flags_to_str(btrfs_block_group_flags(&bg_item),
-					bg_flags_str);
+					flags_str);
 			printf("\t\tblock group used %llu chunk_objectid %llu flags %s\n",
 			       (unsigned long long)btrfs_block_group_used(&bg_item),
 			       (unsigned long long)btrfs_block_group_chunk_objectid(&bg_item),
-			       bg_flags_str);
+			       flags_str);
 			break;
 		case BTRFS_CHUNK_ITEM_KEY:
 			print_chunk(l, btrfs_item_ptr(l, i, struct btrfs_chunk));
@@ -951,14 +969,16 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 		case BTRFS_QGROUP_STATUS_KEY:
 			qg_status = btrfs_item_ptr(l, i,
 					struct btrfs_qgroup_status_item);
-			printf("\t\tversion %llu generation %llu flags %#llx "
+			memset(flags_str, 0, sizeof(flags_str));
+			qgroup_flags_to_str(btrfs_qgroup_status_flags(l, qg_status),
+					flags_str);
+			printf("\t\tversion %llu generation %llu flags %s "
 				"scan %lld\n",
 				(unsigned long long)
 				btrfs_qgroup_status_version(l, qg_status),
 				(unsigned long long)
 				btrfs_qgroup_status_generation(l, qg_status),
-				(unsigned long long)
-				btrfs_qgroup_status_flags(l, qg_status),
+				flags_str,
 				(unsigned long long)
 				btrfs_qgroup_status_scan(l, qg_status));
 			break;
