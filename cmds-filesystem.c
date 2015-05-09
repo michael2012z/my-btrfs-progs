@@ -14,7 +14,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,9 +33,8 @@
 #include "ioctl.h"
 #include "utils.h"
 #include "volumes.h"
-#include "version.h"
 #include "commands.h"
-#include "cmds-fi-disk_usage.h"
+#include "cmds-fi-usage.h"
 #include "list_sort.h"
 #include "disk-io.h"
 
@@ -126,7 +124,8 @@ static const char * const cmd_filesystem_df_usage[] = {
        "btrfs filesystem df [options] <path>",
        "Show space usage information for a mount point",
 	"-b|--raw           raw numbers in bytes",
-	"-h                 human friendly numbers, base 1024 (default)",
+	"-h|--human-readable",
+	"                   human friendly numbers, base 1024 (default)",
 	"-H                 human friendly numbers, base 1000",
 	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
 	"--si               use 1000 as a base (kB, MB, GB, TB)",
@@ -209,7 +208,7 @@ static int cmd_filesystem_df(int argc, char **argv)
 	unsigned unit_mode = UNITS_DEFAULT;
 
 	while (1) {
-		int long_index;
+		int c;
 		static const struct option long_options[] = {
 			{ "raw", no_argument, NULL, 'b'},
 			{ "kbytes", no_argument, NULL, 'k'},
@@ -218,9 +217,12 @@ static int cmd_filesystem_df(int argc, char **argv)
 			{ "tbytes", no_argument, NULL, 't'},
 			{ "si", no_argument, NULL, GETOPT_VAL_SI},
 			{ "iec", no_argument, NULL, GETOPT_VAL_IEC},
+			{ "human-readable", no_argument, NULL,
+				GETOPT_VAL_HUMAN_READABLE},
+			{ NULL, 0, NULL, 0 }
 		};
-		int c = getopt_long(argc, argv, "bhHkmgt", long_options,
-					&long_index);
+
+		c = getopt_long(argc, argv, "bhHkmgt", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -239,6 +241,7 @@ static int cmd_filesystem_df(int argc, char **argv)
 		case 't':
 			units_set_base(&unit_mode, UNITS_TBYTES);
 			break;
+		case GETOPT_VAL_HUMAN_READABLE:
 		case 'h':
 			unit_mode = UNITS_HUMAN_BINARY;
 			break;
@@ -700,7 +703,7 @@ static int has_seed_devices(struct btrfs_fs_devices *fs_devices)
 }
 
 static int search_umounted_fs_uuids(struct list_head *all_uuids,
-				    char *search)
+				    char *search, int *found)
 {
 	struct btrfs_fs_devices *cur_fs, *fs_copy;
 	struct list_head *fs_uuids;
@@ -717,7 +720,8 @@ static int search_umounted_fs_uuids(struct list_head *all_uuids,
 		if (search) {
 			if (uuid_search(cur_fs, search) == 0)
 				continue;
-			ret = 1;
+			if (found)
+				*found = 1;
 		}
 
 		/* skip all fs already shown as mounted fs */
@@ -832,14 +836,14 @@ static int cmd_show(int argc, char **argv)
 	int found = 0;
 
 	while (1) {
-		int long_index;
-		static struct option long_options[] = {
+		int c;
+		static const struct option long_options[] = {
 			{ "all-devices", no_argument, NULL, 'd'},
 			{ "mounted", no_argument, NULL, 'm'},
-			{ NULL, no_argument, NULL, 0 },
+			{ NULL, 0, NULL, 0 }
 		};
-		int c = getopt_long(argc, argv, "dm", long_options,
-					&long_index);
+
+		c = getopt_long(argc, argv, "dm", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -922,8 +926,8 @@ devs_only:
 		return 1;
 	}
 
-	found = search_umounted_fs_uuids(&all_uuids, search);
-	if (found < 0) {
+	ret = search_umounted_fs_uuids(&all_uuids, search, &found);
+	if (ret < 0) {
 		fprintf(stderr,
 			"ERROR: %d while searching target device\n", ret);
 		return 1;
@@ -952,7 +956,7 @@ devs_only:
 		free_fs_devices(fs_devices);
 	}
 out:
-	printf("%s\n", BTRFS_BUILD_VERSION);
+	printf("%s\n", PACKAGE_STRING);
 	free_seen_fsid();
 	return ret;
 }
@@ -1208,7 +1212,7 @@ static int cmd_defrag(int argc, char **argv)
 		}
 	}
 	if (defrag_global_verbose)
-		printf("%s\n", BTRFS_BUILD_VERSION);
+		printf("%s\n", PACKAGE_STRING);
 	if (defrag_global_errors)
 		fprintf(stderr, "total %d failures\n", defrag_global_errors);
 
@@ -1230,6 +1234,7 @@ static int cmd_resize(int argc, char **argv)
 	int	fd, res, len, e;
 	char	*amount, *path;
 	DIR	*dirstream = NULL;
+	struct stat st;
 
 	if (check_argc_exact(argc, 3))
 		usage(cmd_resize_usage);
@@ -1241,6 +1246,20 @@ static int cmd_resize(int argc, char **argv)
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
 		fprintf(stderr, "ERROR: size value too long ('%s)\n",
 			amount);
+		return 1;
+	}
+
+	res = stat(path, &st);
+	if (res < 0) {
+		fprintf(stderr, "ERROR: resize: cannot stat %s: %s\n",
+				path, strerror(errno));
+		return 1;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr,
+			"ERROR: resize works on mounted filesystems and accepts only\n"
+			"directories as argument. Passing file containing a btrfs image\n"
+			"would resize the underlying filesystem instead of the image.\n");
 		return 1;
 	}
 
@@ -1258,6 +1277,18 @@ static int cmd_resize(int argc, char **argv)
 	if( res < 0 ){
 		fprintf(stderr, "ERROR: unable to resize '%s' - %s\n", 
 			path, strerror(e));
+		return 1;
+	} else if (res > 0) {
+		const char *err_str = btrfs_err_str(res);
+
+		if (err_str) {
+			fprintf(stderr, "ERROR: btrfs error resizing '%s' - %s\n",
+				path, err_str);
+		} else {
+			fprintf(stderr,
+			"ERROR: btrfs error resizing '%s' - unknown btrfs_err_code %d\n",
+				path, res);
+		}
 		return 1;
 	}
 	return 0;

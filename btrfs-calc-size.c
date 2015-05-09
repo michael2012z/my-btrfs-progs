@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +31,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "volumes.h"
 #include "utils.h"
 
@@ -159,7 +156,7 @@ static int walk_nodes(struct btrfs_root *root, struct btrfs_path *path,
 			tmp = read_tree_block(root, cur_blocknr,
 					      btrfs_level_size(root, level - 1),
 					      btrfs_node_ptr_generation(b, i));
-			if (!tmp) {
+			if (!extent_buffer_uptodate(tmp)) {
 				fprintf(stderr, "Failed to read blocknr %Lu\n",
 					btrfs_node_blockptr(b, i));
 				continue;
@@ -221,9 +218,9 @@ static void print_seek_histogram(struct root_stats *stat)
 	struct rb_node *n = rb_first(&stat->seek_root);
 	struct seek *seek;
 	u64 tick_interval;
-	u64 group_start;
+	u64 group_start = 0;
 	u64 group_count = 0;
-	u64 group_end;
+	u64 group_end = 0;
 	u64 i;
 	u64 max_seek = stat->max_seek_len;
 	int digits = 1;

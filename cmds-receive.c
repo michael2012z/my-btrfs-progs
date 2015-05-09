@@ -16,11 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _GNU_SOURCE
-#define _POSIX_C_SOURCE 200809
-#define _XOPEN_SOURCE 700
-#define _DEFAULT_SOURCE
-
 #include "kerncompat.h"
 
 #include <unistd.h>
@@ -66,6 +61,7 @@ struct btrfs_receive
 	char *root_path;
 	char *dest_dir_path; /* relative to root_path */
 	char *full_subvol_path;
+	int dest_dir_chroot;
 
 	struct subvol_info *cur_subvol;
 
@@ -863,14 +859,35 @@ static int do_receive(struct btrfs_receive *r, const char *tomnt, int r_fd,
 		goto out;
 	}
 
-	/*
-	 * find_mount_root returns a root_path that is a subpath of
-	 * dest_dir_full_path. Now get the other part of root_path,
-	 * which is the destination dir relative to root_path.
-	 */
-	r->dest_dir_path = dest_dir_full_path + strlen(r->root_path);
-	while (r->dest_dir_path[0] == '/')
-		r->dest_dir_path++;
+	if (r->dest_dir_chroot) {
+		if (chroot(dest_dir_full_path)) {
+			ret = -errno;
+			fprintf(stderr,
+				"ERROR: failed to chroot to %s, %s\n",
+				dest_dir_full_path,
+				strerror(-ret));
+			goto out;
+		}
+		if (chdir("/")) {
+			ret = -errno;
+			fprintf(stderr,
+				"ERROR: failed to chdir to /, %s\n",
+				strerror(-ret));
+			goto out;
+		}
+		fprintf(stderr, "Chroot to %s\n", dest_dir_full_path);
+		r->root_path = strdup("/");
+		r->dest_dir_path = r->root_path;
+	} else {
+		/*
+		 * find_mount_root returns a root_path that is a subpath of
+		 * dest_dir_full_path. Now get the other part of root_path,
+		 * which is the destination dir relative to root_path.
+		 */
+		r->dest_dir_path = dest_dir_full_path + strlen(r->root_path);
+		while (r->dest_dir_path[0] == '/')
+			r->dest_dir_path++;
+	}
 
 	ret = subvol_uuid_search_init(r->mnt_fd, &r->sus);
 	if (ret < 0)
@@ -922,14 +939,8 @@ out:
 	return ret;
 }
 
-static const struct option long_opts[] = {
-	{ "max-errors", 1, NULL, 'E' },
-	{ NULL, 0, NULL, 0 }
-};
-
 int cmd_receive(int argc, char **argv)
 {
-	int c;
 	char *tomnt = NULL;
 	char *fromfile = NULL;
 	struct btrfs_receive r;
@@ -941,8 +952,20 @@ int cmd_receive(int argc, char **argv)
 	r.mnt_fd = -1;
 	r.write_fd = -1;
 	r.dest_dir_fd = -1;
+	r.dest_dir_chroot = 0;
 
-	while ((c = getopt_long(argc, argv, "evf:", long_opts, NULL)) != -1) {
+	while (1) {
+		int c;
+		static const struct option long_opts[] = {
+			{ "max-errors", required_argument, NULL, 'E' },
+			{ "chroot", no_argument, NULL, 'C' },
+			{ NULL, 0, NULL, 0 }
+		};
+
+		c = getopt_long(argc, argv, "Cevf:", long_opts, NULL);
+		if (c < 0)
+			break;
+
 		switch (c) {
 		case 'v':
 			g_verbose++;
@@ -952,6 +975,9 @@ int cmd_receive(int argc, char **argv)
 			break;
 		case 'e':
 			r.honor_end_cmd = 1;
+			break;
+		case 'C':
+			r.dest_dir_chroot = 1;
 			break;
 		case 'E':
 			max_errors = arg_strtou64(optarg);
@@ -1002,6 +1028,7 @@ const char * const cmd_receive_usage[] = {
 	"                 in the data stream. Without this option,",
 	"                 the receiver terminates only if an error",
 	"                 is recognized or on EOF.",
+	"-C|--chroot      confine the process to <mount> using chroot",
 	"--max-errors <N> Terminate as soon as N errors happened while",
 	"                 processing commands from the send stream.",
 	"                 Default value is 1. A value of 0 means no limit.",

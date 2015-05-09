@@ -16,8 +16,6 @@
  * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 021110-1307, USA.
  */
-#define _XOPEN_SOURCE 600
-#define __USE_XOPEN2K
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -577,7 +575,7 @@ struct extent_buffer *btrfs_clone_extent_buffer(struct extent_buffer *src)
 
 void free_extent_buffer(struct extent_buffer *eb)
 {
-	if (!eb)
+	if (!eb || IS_ERR(eb))
 		return;
 
 	eb->refs--;
@@ -826,30 +824,6 @@ int write_data_to_disk(struct btrfs_fs_info *info, void *buf, u64 offset,
 		kfree(multi);
 		multi = NULL;
 	}
-	return 0;
-}
-
-
-int set_extent_buffer_uptodate(struct extent_buffer *eb)
-{
-	eb->flags |= EXTENT_UPTODATE;
-	return 0;
-}
-
-int clear_extent_buffer_uptodate(struct extent_io_tree *tree,
-				struct extent_buffer *eb)
-{
-	eb->flags &= ~EXTENT_UPTODATE;
-	return 0;
-}
-
-int extent_buffer_uptodate(struct extent_buffer *eb)
-{
-	if (!eb)
-		return 0;
-
-	if (eb->flags & EXTENT_UPTODATE)
-		return 1;
 	return 0;
 }
 

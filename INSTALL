@@ -1,57 +1,49 @@
-Install Instructions
+Installation instructions
+=========================
 
-Btrfs uses libcrc32c in the kernel for file and metadata checksums.  You need
-to compile the kernel with:
+The Btrfs utility programs require the following libraries/tools to build:
 
-CONFIG_LIBCRC32C=m
+- libuuid - provided by util-linux, e2fsprogs/e2fslibs or libuuid
+- libblkid - block device id library
+- liblzo2 - LZO data compression library
+- zlib - ZLIB data compression library
 
-libcrc32c can be static as well.  Once your kernel is setup, typing make in the
-btrfs module sources will build against the running kernel.  When the build is
-complete:
+For the btrfs-convert utility:
 
-modprobe libcrc32c
-insmod btrfs.ko
+- e2fsprogs - ext2/ext3/ext4 file system libraries, or called e2fslibs
 
-The Btrfs utility programs require libuuid to build.  This can be found
-in the e2fsprogs sources, and is usually available as libuuid or
-e2fsprogs-devel from various distros.
+Generating documentation:
 
-The Btrfs utility programs also require libblkid (block device identification
-library). This library is usually available as libblkid-dev or libblkid-devel.
+- asciidoc - text document format tool
+- xmlto - text document format tool
 
-Building the utilities is just make ; make install.  The programs go
-into /usr/local/bin.  The mains commands available are:
+XATTR and ACL libraries should be provided by the standard C library or by
 
-mkfs.btrfs: create a filesystem
+- libattr - extended attribute library
+- libacl - access control list library
 
-btrfs: control program to create snapshots and subvolumes:
-	# mount a btrfs filesystem
-	mount /dev/sda2 /mnt
+Please note that the package names may differ according to the distribution.
+See https://btrfs.wiki.kernel.org/index.php/Btrfs_source_repositories#Dependencies .
 
-	# create a subvolume
-	btrfs subvolume create /mnt/new_subvol_name
+To build from git sources you need to generate the confiture script using the
+autools:
 
-	# snapshot of a subvolume
-	btrfs subvolume snapshot /mnt/default /mnt/snapshot_of_default 
-	btrfs subvolume snapshot /mnt/snapshot_of_default \
-		/mnt/snapshot_of_a_snapshot
+ $ ./autogen.sh
 
-	# list of the subvolumes
-	ls /mnt
-	default snapshot_of_a_snapshot snapshot_of_new_subvol
-	new_subvol_name snapshot_of_default
+To build from the released tarballs:
 
-	# removal of a subvolume or a snapshot
-	btrfs subvolume delete /mn/snapshot_of_a_snapshot
+ $ ./configure
+ $ make
+ $ make install
 
-	# look a the btrfs man page for further information
-	man btrfs
+You may disable building some parts like documentation, btrfs-convert or
+backtrace support. See ./configure --help for more.
 
-btrfsck: do a limited check of the FS extent trees.</li>
+Specific CFLAGS or LDFLAGS should be set like
 
-btrfs-debug-tree: print all of the FS metadata in text form.  Example:
+ $ CFLAGS=... LDFLAGS=... ./configure --prefix=/usr
 
-	btrfs-debug-tree /dev/sda2 >& big_output_file
+and not as arguments to make.
 
-
-
+References:
+* https://btrfs.wiki.kernel.org

@@ -27,7 +27,7 @@
 #include "kerncompat.h"
 #include "ctree.h"
 #include "string-table.h"
-#include "cmds-fi-disk_usage.h"
+#include "cmds-fi-usage.h"
 #include "commands.h"
 
 #include "version.h"
@@ -324,6 +324,7 @@ static int print_filesystem_usage_overall(int fd, struct chunk_info *chunkinfo,
 	u64 r_total_chunks = 0;	/* sum of chunks sizes on disk(s) */
 	u64 r_total_used = 0;
 	u64 r_total_unused = 0;
+	u64 r_total_missing = 0;	/* sum of missing devices size */
 	u64 r_data_used = 0;
 	u64 r_data_chunks = 0;
 	u64 l_data_chunks = 0;
@@ -350,8 +351,11 @@ static int print_filesystem_usage_overall(int fd, struct chunk_info *chunkinfo,
 	}
 
 	r_total_size = 0;
-	for (i = 0; i < devcount; i++)
-		r_total_size += devinfo[i].device_size;
+	for (i = 0; i < devcount; i++) {
+		r_total_size += devinfo[i].size;
+		if (!devinfo[i].device_size)
+			r_total_missing += devinfo[i].size;
+	}
 
 	if (r_total_size == 0) {
 		fprintf(stderr,
@@ -461,6 +465,8 @@ static int print_filesystem_usage_overall(int fd, struct chunk_info *chunkinfo,
 		pretty_size_mode(r_total_chunks, unit_mode));
 	printf("    Device unallocated:\t\t%*s\n", width,
 		pretty_size_mode(r_total_unused, unit_mode));
+	printf("    Device missing:\t\t%*s\n", width,
+		pretty_size_mode(r_total_missing, unit_mode));
 	printf("    Used:\t\t\t%*s\n", width,
 		pretty_size_mode(r_total_used, unit_mode));
 	printf("    Free (estimated):\t\t%*s\t(",
@@ -538,8 +544,13 @@ static int load_device_info(int fd, struct device_info **device_info_ptr,
 		}
 
 		info[ndevs].devid = dev_info.devid;
-		strcpy(info[ndevs].path, (char *)dev_info.path);
-		info[ndevs].device_size = get_partition_size((char *)dev_info.path);
+		if (!dev_info.path[0]) {
+			strcpy(info[ndevs].path, "missing");
+		} else {
+			strcpy(info[ndevs].path, (char *)dev_info.path);
+			info[ndevs].device_size =
+				get_partition_size((char *)dev_info.path);
+		}
 		info[ndevs].size = dev_info.total_bytes;
 		++ndevs;
 	}
@@ -849,7 +860,8 @@ const char * const cmd_filesystem_usage_usage[] = {
 	"btrfs filesystem usage [options] <path> [<path>..]",
 	"Show detailed information about internal filesystem usage .",
 	"-b|--raw           raw numbers in bytes",
-	"-h                 human friendly numbers, base 1024 (default)",
+	"-h|--human-readable",
+	"                   human friendly numbers, base 1024 (default)",
 	"-H                 human friendly numbers, base 1000",
 	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
 	"--si               use 1000 as a base (kB, MB, GB, TB)",
@@ -870,7 +882,7 @@ int cmd_filesystem_usage(int argc, char **argv)
 
 	optind = 1;
 	while (1) {
-		int long_index;
+		int c;
 		static const struct option long_options[] = {
 			{ "raw", no_argument, NULL, 'b'},
 			{ "kbytes", no_argument, NULL, 'k'},
@@ -879,9 +891,12 @@ int cmd_filesystem_usage(int argc, char **argv)
 			{ "tbytes", no_argument, NULL, 't'},
 			{ "si", no_argument, NULL, GETOPT_VAL_SI},
 			{ "iec", no_argument, NULL, GETOPT_VAL_IEC},
+			{ "human-readable", no_argument, NULL,
+				GETOPT_VAL_HUMAN_READABLE},
+			{ NULL, 0, NULL, 0 }
 		};
-		int c = getopt_long(argc, argv, "bhHkmgtT", long_options,
-				&long_index);
+
+		c = getopt_long(argc, argv, "bhHkmgtT", long_options, NULL);
 
 		if (c < 0)
 			break;
@@ -901,6 +916,7 @@ int cmd_filesystem_usage(int argc, char **argv)
 		case 't':
 			units_set_base(&unit_mode, UNITS_TBYTES);
 			break;
+		case GETOPT_VAL_HUMAN_READABLE:
 		case 'h':
 			unit_mode = UNITS_HUMAN_BINARY;
 			break;

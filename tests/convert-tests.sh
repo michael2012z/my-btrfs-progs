@@ -4,34 +4,56 @@
 # clean.
 #
 
-here=`pwd`
+unset TOP
+unset LANG
+LANG=C
+SCRIPT_DIR=$(dirname $(realpath $0))
+TOP=$(realpath $SCRIPT_DIR/../)
+TEST_MNT=${TEST_MNT:-$TOP/tests/mnt}
+RESULTS="$TOP/tests/convert-tests-results.txt"
+IMAGE="$TOP/tests/test.img"
 
-_fail()
-{
-	echo "$*" | tee -a convert-tests-results.txt
-	exit 1
-}
+source $TOP/tests/common
 
-rm -f convert-tests-results.txt
+rm -f $RESULTS
 
-test(){
-	echo "     [TEST]    $1"
-	shift
-	echo "creating ext image with: $*" >> convert-tests-results.txt
+setup_root_helper
+
+convert_test() {
+	echo "    [TEST]   $1"
+	nodesize=$2
+	shift 2
+	echo "creating ext image with: $*" >> $RESULTS
+	# IMAGE not removed as the file might have special permissions, eg.
+	# when test image is on NFS and would not be writable for root
+	run_check truncate -s 0 $IMAGE
 	# 256MB is the smallest acceptable btrfs image.
-	rm -f $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "could not remove test image file"
-	truncate -s 256M $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "could not create test image file"
-	$* -F $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "filesystem create failed"
-	$here/btrfs-convert $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "btrfs-convert failed"
-	$here/btrfs check $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "btrfs check detected errors"
+	run_check truncate -s 256M $IMAGE
+	run_check $* -F $IMAGE
+
+	# create a file to check btrfs-convert can convert regular file
+	# correct
+	run_check $SUDO_HELPER mount $IMAGE $TEST_MNT
+	run_check $SUDO_HELPER dd if=/dev/zero of=$TEST_MNT/test bs=$nodesize \
+		count=1 1>/dev/null 2>&1
+	run_check $SUDO_HELPER umount $TEST_MNT
+	run_check $TOP/btrfs-convert -N "$nodesize" $IMAGE
+	run_check $TOP/btrfs check $IMAGE
 }
 
 # btrfs-convert requires 4k blocksize.
-test "ext2" mke2fs -b 4096
-test "ext3" mke2fs -j -b 4096
-test "ext4" mke2fs -t ext4 -b 4096
+convert_test "ext2 4k nodesize" 4096 mke2fs -b 4096
+convert_test "ext3 4k nodesize" 4096 mke2fs -j -b 4096
+convert_test "ext4 4k nodesize" 4096 mke2fs -t ext4 -b 4096
+convert_test "ext2 8k nodesize" 8192 mke2fs -b 4096
+convert_test "ext3 8k nodesize" 8192 mke2fs -j -b 4096
+convert_test "ext4 8k nodesize" 8192 mke2fs -t ext4 -b 4096
+convert_test "ext2 16k nodesize" 16384 mke2fs -b 4096
+convert_test "ext3 16k nodesize" 16384 mke2fs -j -b 4096
+convert_test "ext4 16k nodesize" 16384 mke2fs -t ext4 -b 4096
+convert_test "ext2 32k nodesize" 32768 mke2fs -b 4096
+convert_test "ext3 32k nodesize" 32768 mke2fs -j -b 4096
+convert_test "ext4 32k nodesize" 32768 mke2fs -t ext4 -b 4096
+convert_test "ext2 64k nodesize" 65536 mke2fs -b 4096
+convert_test "ext3 64k nodesize" 65536 mke2fs -j -b 4096
+convert_test "ext4 64k nodesize" 65536 mke2fs -t ext4 -b 4096

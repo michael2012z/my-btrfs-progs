@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __BTRFS__
-#define __BTRFS__
+#ifndef __BTRFS_CTREE_H__
+#define __BTRFS_CTREE_H__
 
 #if BTRFS_FLAT_INCLUDES
 #include "list.h"
@@ -309,6 +309,7 @@ static inline unsigned long btrfs_chunk_item_size(int num_stripes)
 #define BTRFS_HEADER_FLAG_RELOC			(1ULL << 1)
 #define BTRFS_SUPER_FLAG_SEEDING		(1ULL << 32)
 #define BTRFS_SUPER_FLAG_METADUMP		(1ULL << 33)
+#define BTRFS_SUPER_FLAG_METADUMP_V2		(1ULL << 34)
 
 #define BTRFS_BACKREF_REV_MAX		256
 #define BTRFS_BACKREF_REV_SHIFT		56
@@ -867,11 +868,21 @@ struct btrfs_csum_item {
  */
 #define BTRFS_SPACE_INFO_GLOBAL_RSV    (1ULL << 49)
 
-#define BTRFS_QGROUP_STATUS_OFF			0
-#define BTRFS_QGROUP_STATUS_ON			1
-#define BTRFS_QGROUP_STATUS_SCANNING		2
+#define BTRFS_QGROUP_LEVEL_SHIFT		48
 
-#define BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT	(1 << 0)
+static inline u64 btrfs_qgroup_level(u64 qgroupid)
+{
+	return qgroupid >> BTRFS_QGROUP_LEVEL_SHIFT;
+}
+
+static inline u64 btrfs_qgroup_subvid(u64 qgroupid)
+{
+	return qgroupid & ((1ULL << BTRFS_QGROUP_LEVEL_SHIFT) - 1);
+}
+
+#define BTRFS_QGROUP_STATUS_FLAG_ON		(1ULL << 0)
+#define BTRFS_QGROUP_STATUS_FLAG_RESCAN		(1ULL << 1)
+#define BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT	(1ULL << 2)
 
 struct btrfs_qgroup_status_item {
 	__le64 version;
@@ -925,6 +936,7 @@ struct btrfs_block_group_cache {
 	struct btrfs_block_group_item item;
 	struct btrfs_space_info *space_info;
 	struct btrfs_free_space_ctl *free_space_ctl;
+	u64 bytes_super;
 	u64 pinned;
 	u64 flags;
 	int cached;
@@ -962,6 +974,7 @@ struct btrfs_fs_info {
 	struct extent_io_tree pinned_extents;
 	struct extent_io_tree pending_del;
 	struct extent_io_tree extent_ins;
+	struct extent_io_tree *excluded_extents;
 
 	/* logical->physical extent mapping */
 	struct btrfs_mapping_tree mapping_tree;
@@ -996,6 +1009,7 @@ struct btrfs_fs_info {
 	unsigned int on_restoring:1;
 	unsigned int is_chunk_recover:1;
 	unsigned int quota_enabled:1;
+	unsigned int suppress_check_block_errors:1;
 
 	int (*free_extent_hook)(struct btrfs_trans_handle *trans,
 				struct btrfs_root *root,
@@ -1004,6 +1018,7 @@ struct btrfs_fs_info {
 				int refs_to_drop);
 	struct cache_tree *fsck_extent_cache;
 	struct cache_tree *corrupt_blocks;
+
 };
 
 /*
@@ -1038,6 +1053,16 @@ struct btrfs_root {
 	u32 type;
 	u64 highest_inode;
 	u64 last_inode_alloc;
+
+	/*
+	 * Record orphan data extent ref
+	 *
+	 * TODO: Don't restore things in btrfs_root.
+	 * Directly record it into inode_record, which needs a lot of
+	 * infrastructure change to allow cooperation between extent
+	 * and fs tree scan.
+	 */
+	struct list_head orphan_data_extents;
 
 	/* the dirty list is only used by non-reference counted roots */
 	struct list_head dirty_list;
@@ -2056,6 +2081,15 @@ BTRFS_SETGET_FUNCS(qgroup_status_flags, struct btrfs_qgroup_status_item,
 BTRFS_SETGET_FUNCS(qgroup_status_scan, struct btrfs_qgroup_status_item,
 		   scan, 64);
 
+BTRFS_SETGET_STACK_FUNCS(stack_qgroup_status_version,
+			 struct btrfs_qgroup_status_item, version, 64);
+BTRFS_SETGET_STACK_FUNCS(stack_qgroup_status_generation,
+			 struct btrfs_qgroup_status_item, generation, 64);
+BTRFS_SETGET_STACK_FUNCS(stack_qgroup_status_flags,
+			 struct btrfs_qgroup_status_item, flags, 64);
+BTRFS_SETGET_STACK_FUNCS(stack_qgroup_status_scan,
+			 struct btrfs_qgroup_status_item, scan, 64);
+
 /* btrfs_qgroup_info_item */
 BTRFS_SETGET_FUNCS(qgroup_info_generation, struct btrfs_qgroup_info_item,
 		   generation, 64);
@@ -2458,4 +2492,13 @@ int btrfs_add_orphan_item(struct btrfs_trans_handle *trans,
 			  u64 ino);
 int btrfs_mkdir(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		char *name, int namelen, u64 parent_ino, u64 *ino, int mode);
+
+/* file.c */
+int btrfs_get_extent(struct btrfs_trans_handle *trans,
+		     struct btrfs_root *root,
+		     struct btrfs_path *path,
+		     u64 ino, u64 offset, u64 len, int ins_len);
+int btrfs_punch_hole(struct btrfs_trans_handle *trans,
+		     struct btrfs_root *root,
+		     u64 ino, u64 offset, u64 len);
 #endif

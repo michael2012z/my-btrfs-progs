@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __UTILS__
-#define __UTILS__
+#ifndef __BTRFS_UTILS_H__
+#define __BTRFS_UTILS_H__
 
 #include <sys/stat.h>
 #include "ctree.h"
@@ -25,6 +25,12 @@
 
 #define BTRFS_MKFS_SYSTEM_GROUP_SIZE (4 * 1024 * 1024)
 #define BTRFS_MKFS_SMALL_VOLUME_SIZE (1024 * 1024 * 1024)
+#define BTRFS_MKFS_DEFAULT_NODE_SIZE 16384
+#define BTRFS_MKFS_DEFAULT_FEATURES 				\
+		(BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF		\
+		| BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA)
+
+#define BTRFS_FEATURE_LIST_ALL		(1ULL << 63)
 
 #define BTRFS_SCAN_MOUNTED	(1ULL << 0)
 #define BTRFS_SCAN_LBLKID	(1ULL << 1)
@@ -41,8 +47,14 @@
 
 #define ARGV0_BUF_SIZE	PATH_MAX
 
-#define GETOPT_VAL_SI	256
-#define GETOPT_VAL_IEC	257
+#define GETOPT_VAL_SI				256
+#define GETOPT_VAL_IEC				257
+#define GETOPT_VAL_RAW				258
+#define GETOPT_VAL_HUMAN_READABLE		259
+#define GETOPT_VAL_KBYTES			260
+#define GETOPT_VAL_MBYTES			261
+#define GETOPT_VAL_GBYTES			262
+#define GETOPT_VAL_TBYTES			263
 
 int check_argc_exact(int nargs, int expected);
 int check_argc_min(int nargs, int expected);
@@ -73,9 +85,13 @@ void set_argv0(char **argv);
 void units_set_mode(unsigned *units, unsigned mode);
 void units_set_base(unsigned *units, unsigned base);
 
+void btrfs_list_all_fs_features(u64 mask_disallowed);
+char* btrfs_parse_fs_features(char *namelist, u64 *flags);
+void btrfs_process_fs_features(u64 flags);
+
 int make_btrfs(int fd, const char *device, const char *label,
 	       char *fs_uuid, u64 blocks[6], u64 num_bytes, u32 nodesize,
-	       u32 leafsize, u32 sectorsize, u32 stripesize, u64 features);
+	       u32 sectorsize, u32 stripesize, u64 features);
 int btrfs_make_root_dir(struct btrfs_trans_handle *trans,
 			struct btrfs_root *root, u64 objectid);
 int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
@@ -107,6 +123,7 @@ int pretty_size_snprintf(u64 size, char *str, size_t str_bytes, unsigned unit_mo
 int get_mountpt(char *dev, char *mntpt, size_t size);
 int btrfs_scan_block_devices(int run_ioctl);
 u64 parse_size(char *s);
+u64 parse_qgroupid(const char *p);
 u64 arg_strtou64(const char *str);
 int open_file_or_dir(const char *fname, DIR **dirstream);
 int open_file_or_dir3(const char *fname, DIR **dirstream, int open_flags);
@@ -202,5 +219,6 @@ static inline u64 div_factor(u64 num, int factor)
 }
 
 int btrfs_tree_search2_ioctl_supported(int fd);
+int btrfs_check_nodesize(u32 nodesize, u32 sectorsize);
 
 #endif

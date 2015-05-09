@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# Common routines for all tests
+#
+
+_fail()
+{
+	echo "$*" | tee -a $RESULTS
+	exit 1
+}
+
+_not_run()
+{
+	echo "    [NOTRUN] $*"
+	exit 0
+}
+
+run_check()
+{
+	echo "############### $@" >> $RESULTS 2>&1
+	"$@" >> $RESULTS 2>&1 || _fail "failed: $@"
+}
+
+check_prereq()
+{
+	if ! [ -f $TOP/$1 ]; then
+		_fail "Failed prerequisities: $1";
+	fi
+}
+
+check_image()
+{
+	image=$1
+	echo "testing image $(basename $image)" >> $RESULTS
+	$TOP/btrfs check $image >> $RESULTS 2>&1
+	[ $? -eq 0 ] && _fail "btrfs check should have detected corruption"
+
+	run_check $TOP/btrfs check --repair $image
+	run_check $TOP/btrfs check $image
+}
+
+check_all_images()
+{
+	dir=$1
+	for i in $(find $dir -iname '*.img')
+	do
+		echo "extracting image $(basename $i)" >> $RESULTS
+		$TOP/btrfs-image -r $i $i.restored || \
+			_fail "failed to extract image $i"
+
+		check_image $i.restored
+
+		rm $i.restored
+	done
+}
+
+# some tests need to mount the recovered image and do verifications call
+# 'setup_root_helper' and then check for have_root_helper == 1 if the test
+# needs to fail otherwise; using sudo by default for now
+SUDO_HELPER=
+NEED_SUDO_VALIDATE=unknown
+export SUDO_HELPER
+export NEED_SUDO_VALIDATE
+root_helper()
+{
+	if [ $UID -eq 0 ]; then
+		"$@"
+	else
+		if [ "$NEED_SUDO_VALIDATE" = 'yes' ]; then
+			sudo -v -n &>/dev/null || \
+				_not_run "Need to validate sudo credentials"
+			sudo -n "$@"
+		elif [ "$NEED_SUDO_VALIDATE" = 'no' ]; then
+			sudo -n /bin/true &> /dev/null || \
+				_not_run "Need to validate sudo user settings"
+			sudo -n "$@"
+		else
+			# should not happen
+			_not_run "Need to validate root privileges"
+		fi
+	fi
+}
+
+setup_root_helper()
+{
+	if [ $UID -eq 0 ]; then
+		return
+	fi
+
+	# Test for old sudo or special settings, which make sudo -v fail even
+	# if user setting is NOPASSWD
+	sudo -n /bin/true &>/dev/null && NEED_SUDO_VALIDATE=no
+
+	# Newer sudo or default sudo setting
+	sudo -v -n &>/dev/null && NEED_SUDO_VALIDATE=yes
+
+	if [ "$NEED_SUDO_VALIDATE" = 'unknown' ]; then
+		_not_run "Need to validate root privileges"
+	fi
+	SUDO_HELPER=root_helper
+}
