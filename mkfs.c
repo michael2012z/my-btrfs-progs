@@ -17,6 +17,7 @@
  */
 
 #include "kerncompat.h"
+#include "androidcompat.h"
 
 #include <sys/ioctl.h>
 #include <sys/mount.h>
@@ -25,7 +26,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/dir.h>
+/* #include <sys/dir.h> included via androidcompat.h */
 #include <fcntl.h>
 #include <unistd.h>
 #include <getopt.h>
@@ -43,9 +44,7 @@
 #include "utils.h"
 
 static u64 index_cnt = 2;
-
-#define DEFAULT_MKFS_FEATURES	(BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF \
-		| BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA)
+static int verbose = 1;
 
 struct directory_name_entry {
 	char *dir_name;
@@ -54,10 +53,17 @@ struct directory_name_entry {
 	struct list_head list;
 };
 
-static int make_root_dir(struct btrfs_root *root, int mixed)
+struct mkfs_allocation {
+	u64 data;
+	u64 metadata;
+	u64 mixed;
+	u64 system;
+};
+
+static int create_metadata_block_groups(struct btrfs_root *root, int mixed,
+				struct mkfs_allocation *allocation)
 {
 	struct btrfs_trans_handle *trans;
-	struct btrfs_key location;
 	u64 bytes_used;
 	u64 chunk_start = 0;
 	u64 chunk_size = 0;
@@ -71,6 +77,7 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 				     BTRFS_BLOCK_GROUP_SYSTEM,
 				     BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 				     0, BTRFS_MKFS_SYSTEM_GROUP_SIZE);
+	allocation->system += BTRFS_MKFS_SYSTEM_GROUP_SIZE;
 	BUG_ON(ret);
 
 	if (mixed) {
@@ -90,7 +97,7 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 					     BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 					     chunk_start, chunk_size);
 		BUG_ON(ret);
-		printf("Created a data/metadata chunk of size %llu\n", chunk_size);
+		allocation->mixed += chunk_size;
 	} else {
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
 					&chunk_start, &chunk_size,
@@ -104,13 +111,24 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 					     BTRFS_BLOCK_GROUP_METADATA,
 					     BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 					     chunk_start, chunk_size);
+		allocation->metadata += chunk_size;
 		BUG_ON(ret);
 	}
 
 	root->fs_info->system_allocs = 0;
 	btrfs_commit_transaction(trans, root);
-	trans = btrfs_start_transaction(root, 1);
-	BUG_ON(!trans);
+
+err:
+	return ret;
+}
+
+static int create_data_block_groups(struct btrfs_trans_handle *trans,
+		struct btrfs_root *root, int mixed,
+		struct mkfs_allocation *allocation)
+{
+	u64 chunk_start = 0;
+	u64 chunk_size = 0;
+	int ret = 0;
 
 	if (!mixed) {
 		ret = btrfs_alloc_chunk(trans, root->fs_info->extent_root,
@@ -125,8 +143,19 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 					     BTRFS_BLOCK_GROUP_DATA,
 					     BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 					     chunk_start, chunk_size);
+		allocation->data += chunk_size;
 		BUG_ON(ret);
 	}
+
+err:
+	return ret;
+}
+
+static int make_root_dir(struct btrfs_trans_handle *trans, struct btrfs_root *root,
+		int mixed, struct mkfs_allocation *allocation)
+{
+	struct btrfs_key location;
+	int ret;
 
 	ret = btrfs_make_root_dir(trans, root->fs_info->tree_root,
 			      BTRFS_ROOT_TREE_DIR_OBJECTID);
@@ -150,7 +179,6 @@ static int make_root_dir(struct btrfs_root *root, int mixed)
 	if (ret)
 		goto err;
 
-	btrfs_commit_transaction(trans, root);
 err:
 	return ret;
 }
@@ -184,7 +212,9 @@ static void recow_roots(struct btrfs_trans_handle *trans,
 }
 
 static int create_one_raid_group(struct btrfs_trans_handle *trans,
-			      struct btrfs_root *root, u64 type)
+			      struct btrfs_root *root, u64 type,
+			      struct mkfs_allocation *allocation)
+
 {
 	u64 chunk_start;
 	u64 chunk_size;
@@ -200,14 +230,26 @@ static int create_one_raid_group(struct btrfs_trans_handle *trans,
 	ret = btrfs_make_block_group(trans, root->fs_info->extent_root, 0,
 				     type, BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 				     chunk_start, chunk_size);
+	if ((type & BTRFS_BLOCK_GROUP_TYPE_MASK) == BTRFS_BLOCK_GROUP_DATA)
+		allocation->data += chunk_size;
+	else if ((type & BTRFS_BLOCK_GROUP_TYPE_MASK) == BTRFS_BLOCK_GROUP_METADATA)
+		allocation->metadata += chunk_size;
+	else if ((type & BTRFS_BLOCK_GROUP_TYPE_MASK) == BTRFS_BLOCK_GROUP_SYSTEM)
+		allocation->system += chunk_size;
+	else if ((type & BTRFS_BLOCK_GROUP_TYPE_MASK) ==
+			(BTRFS_BLOCK_GROUP_METADATA|BTRFS_BLOCK_GROUP_DATA))
+		allocation->mixed += chunk_size;
+	else
+		BUG_ON(1);
+
 	BUG_ON(ret);
 	return ret;
 }
 
 static int create_raid_groups(struct btrfs_trans_handle *trans,
 			      struct btrfs_root *root, u64 data_profile,
-			      int data_profile_opt, u64 metadata_profile,
-			      int mixed)
+			      u64 metadata_profile, int mixed,
+			      struct mkfs_allocation *allocation)
 {
 	u64 num_devices = btrfs_super_num_devices(root->fs_info->super_copy);
 	int ret;
@@ -217,21 +259,21 @@ static int create_raid_groups(struct btrfs_trans_handle *trans,
 
 		ret = create_one_raid_group(trans, root,
 					    BTRFS_BLOCK_GROUP_SYSTEM |
-					    metadata_profile);
+					    metadata_profile, allocation);
 		BUG_ON(ret);
 
 		if (mixed)
 			meta_flags |= BTRFS_BLOCK_GROUP_DATA;
 
 		ret = create_one_raid_group(trans, root, meta_flags |
-					    metadata_profile);
+					    metadata_profile, allocation);
 		BUG_ON(ret);
 
 	}
 	if (!mixed && num_devices > 1 && data_profile) {
 		ret = create_one_raid_group(trans, root,
 					    BTRFS_BLOCK_GROUP_DATA |
-					    data_profile);
+					    data_profile, allocation);
 		BUG_ON(ret);
 	}
 	recow_roots(trans, root);
@@ -266,9 +308,7 @@ static int create_data_reloc_tree(struct btrfs_trans_handle *trans,
 	return 0;
 }
 
-
-static void print_usage(void) __attribute__((noreturn));
-static void print_usage(void)
+static void print_usage(int ret)
 {
 	fprintf(stderr, "usage: mkfs.btrfs [options] dev [ dev ... ]\n");
 	fprintf(stderr, "options:\n");
@@ -284,11 +324,12 @@ static void print_usage(void)
 	fprintf(stderr, "\t-s|--sectorsize SIZE    min block allocation (may not mountable by current kernel)\n");
 	fprintf(stderr, "\t-r|--rootdir DIR        the source directory\n");
 	fprintf(stderr, "\t-K|--nodiscard          do not perform whole device TRIM\n");
-	fprintf(stderr, "\t-O|--features LIST      comma separated list of filesystem features\n");
+	fprintf(stderr, "\t-O|--features LIST      comma separated list of filesystem features, use '-O list-all' to list features\n");
 	fprintf(stderr, "\t-U|--uuid UUID          specify the filesystem UUID\n");
+	fprintf(stderr, "\t-q|--quiet              no messages except errors\n");
 	fprintf(stderr, "\t-V|--version            print the mkfs.btrfs version and exit\n");
 	fprintf(stderr, "%s\n", PACKAGE_STRING);
-	exit(1);
+	exit(ret);
 }
 
 static void print_version(void) __attribute__((noreturn));
@@ -302,21 +343,21 @@ static u64 parse_profile(char *s)
 {
 	if (strcmp(s, "raid0") == 0) {
 		return BTRFS_BLOCK_GROUP_RAID0;
-	} else if (strcmp(s, "raid1") == 0) {
+	} else if (strcasecmp(s, "raid1") == 0) {
 		return BTRFS_BLOCK_GROUP_RAID1;
-	} else if (strcmp(s, "raid5") == 0) {
+	} else if (strcasecmp(s, "raid5") == 0) {
 		return BTRFS_BLOCK_GROUP_RAID5;
-	} else if (strcmp(s, "raid6") == 0) {
+	} else if (strcasecmp(s, "raid6") == 0) {
 		return BTRFS_BLOCK_GROUP_RAID6;
-	} else if (strcmp(s, "raid10") == 0) {
+	} else if (strcasecmp(s, "raid10") == 0) {
 		return BTRFS_BLOCK_GROUP_RAID10;
-	} else if (strcmp(s, "dup") == 0) {
+	} else if (strcasecmp(s, "dup") == 0) {
 		return BTRFS_BLOCK_GROUP_DUP;
-	} else if (strcmp(s, "single") == 0) {
+	} else if (strcasecmp(s, "single") == 0) {
 		return 0;
 	} else {
 		fprintf(stderr, "Unknown profile %s\n", s);
-		print_usage();
+		exit(1);
 	}
 	/* not reached */
 	return 0;
@@ -560,7 +601,7 @@ static int add_symbolic_link(struct btrfs_trans_handle *trans,
 		goto fail;
 	}
 	if (ret >= sectorsize) {
-		fprintf(stderr, "symlink too long for %s", path_name);
+		fprintf(stderr, "symlink too long for %s\n", path_name);
 		ret = -1;
 		goto fail;
 	}
@@ -894,7 +935,8 @@ static int open_target(char *output_name)
 
 static int create_chunks(struct btrfs_trans_handle *trans,
 			 struct btrfs_root *root, u64 num_of_meta_chunks,
-			 u64 size_of_data)
+			 u64 size_of_data,
+			 struct mkfs_allocation *allocation)
 {
 	u64 chunk_start;
 	u64 chunk_size;
@@ -911,6 +953,7 @@ static int create_chunks(struct btrfs_trans_handle *trans,
 		ret = btrfs_make_block_group(trans, root->fs_info->extent_root, 0,
 					     meta_type, BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 					     chunk_start, chunk_size);
+		allocation->metadata += chunk_size;
 		BUG_ON(ret);
 		set_extent_dirty(&root->fs_info->free_space_cache,
 				 chunk_start, chunk_start + chunk_size - 1, 0);
@@ -925,6 +968,7 @@ static int create_chunks(struct btrfs_trans_handle *trans,
 	ret = btrfs_make_block_group(trans, root->fs_info->extent_root, 0,
 				     data_type, BTRFS_FIRST_CHUNK_TREE_OBJECTID,
 				     chunk_start, size_of_data);
+	allocation->data += size_of_data;
 	BUG_ON(ret);
 	set_extent_dirty(&root->fs_info->free_space_cache,
 			 chunk_start, chunk_start + size_of_data - 1, 0);
@@ -958,7 +1002,8 @@ static int make_image(char *source_dir, struct btrfs_root *root, int out_fd)
 	}
 	btrfs_commit_transaction(trans, root);
 
-	printf("Making image is completed.\n");
+	if (verbose)
+		printf("Making image is completed.\n");
 	return 0;
 fail:
 	while (!list_empty(&dir_head.list)) {
@@ -1103,95 +1148,178 @@ static int is_ssd(const char *file)
 	return !atoi((const char *)&rotational);
 }
 
-#define BTRFS_FEATURE_LIST_ALL		(1ULL << 63)
-
-static const struct btrfs_fs_feature {
-	const char *name;
-	u64 flag;
-	const char *desc;
-} mkfs_features[] = {
-	{ "mixed-bg", BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS,
-		"mixed data and metadata block groups" },
-	{ "extref", BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF,
-		"increased hardlink limit per file to 65536" },
-	{ "raid56", BTRFS_FEATURE_INCOMPAT_RAID56,
-		"raid56 extended format" },
-	{ "skinny-metadata", BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA,
-		"reduced-size metadata extent refs" },
-	{ "no-holes", BTRFS_FEATURE_INCOMPAT_NO_HOLES,
-		"no explicit hole extents for files" },
-	/* Keep this one last */
-	{ "list-all", BTRFS_FEATURE_LIST_ALL, NULL }
-};
-
-static void list_all_fs_features(void)
+static void list_all_devices(struct btrfs_root *root)
 {
-	int i;
+	struct btrfs_fs_devices *fs_devices;
+	struct btrfs_device *device;
+	int number_of_devices = 0;
+	u64 total_block_count = 0;
 
-	fprintf(stderr, "Filesystem features available at mkfs time:\n");
-	for (i = 0; i < ARRAY_SIZE(mkfs_features) - 1; i++) {
-		char *is_default = "";
+	fs_devices = root->fs_info->fs_devices;
 
-		if (mkfs_features[i].flag & DEFAULT_MKFS_FEATURES)
-			is_default = ", default";
-		fprintf(stderr, "%-20s- %s (0x%llx%s)\n",
-				mkfs_features[i].name,
-				mkfs_features[i].desc,
-				mkfs_features[i].flag,
-				is_default);
+	list_for_each_entry(device, &fs_devices->devices, dev_list)
+		number_of_devices++;
+
+	printf("Number of devices:  %d\n", number_of_devices);
+	/* printf("Total devices size: %10s\n", */
+		/* pretty_size(total_block_count)); */
+	printf("Devices:\n");
+	printf("   ID        SIZE  PATH\n");
+	list_for_each_entry_reverse(device, &fs_devices->devices, dev_list) {
+		char dev_uuid[BTRFS_UUID_UNPARSED_SIZE];
+
+		uuid_unparse(device->uuid, dev_uuid);
+		printf("  %3llu  %10s  %s\n",
+			device->devid,
+			pretty_size(device->total_bytes),
+			device->name);
+		total_block_count += device->total_bytes;
 	}
+
+	printf("\n");
 }
 
-static int parse_one_fs_feature(const char *name, u64 *flags)
+static int is_temp_block_group(struct extent_buffer *node,
+			       struct btrfs_block_group_item *bgi,
+			       u64 data_profile, u64 meta_profile,
+			       u64 sys_profile)
 {
-	int i;
-	int found = 0;
+	u64 flag = btrfs_disk_block_group_flags(node, bgi);
+	u64 flag_type = flag & BTRFS_BLOCK_GROUP_TYPE_MASK;
+	u64 flag_profile = flag & BTRFS_BLOCK_GROUP_PROFILE_MASK;
+	u64 used = btrfs_disk_block_group_used(node, bgi);
 
-	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
-		if (name[0] == '^' &&
-			!strcmp(mkfs_features[i].name, name + 1)) {
-			*flags &= ~ mkfs_features[i].flag;
-			found = 1;
-		} else if (!strcmp(mkfs_features[i].name, name)) {
-			*flags |= mkfs_features[i].flag;
-			found = 1;
+	/*
+	 * Chunks meets all the following conditions is a temp chunk
+	 * 1) Empty chunk
+	 * Temp chunk is always empty.
+	 *
+	 * 2) profile dismatch with mkfs profile.
+	 * Temp chunk is always in SINGLE
+	 *
+	 * 3) Size differs with mkfs_alloc
+	 * Special case for SINGLE/SINGLE btrfs.
+	 * In that case, temp data chunk and real data chunk are always empty.
+	 * So we need to use mkfs_alloc to be sure which chunk is the newly
+	 * allocated.
+	 *
+	 * Normally, new chunk size is equal to mkfs one (One chunk)
+	 * If it has multiple chunks, we just refuse to delete any one.
+	 * As they are all single, so no real problem will happen.
+	 * So only use condition 1) and 2) to judge them.
+	 */
+	if (used != 0)
+		return 0;
+	switch (flag_type) {
+	case BTRFS_BLOCK_GROUP_DATA:
+	case BTRFS_BLOCK_GROUP_DATA | BTRFS_BLOCK_GROUP_METADATA:
+		data_profile &= BTRFS_BLOCK_GROUP_PROFILE_MASK;
+		if (flag_profile != data_profile)
+			return 1;
+		break;
+	case BTRFS_BLOCK_GROUP_METADATA:
+		meta_profile &= BTRFS_BLOCK_GROUP_PROFILE_MASK;
+		if (flag_profile != meta_profile)
+			return 1;
+		break;
+	case BTRFS_BLOCK_GROUP_SYSTEM:
+		sys_profile &= BTRFS_BLOCK_GROUP_PROFILE_MASK;
+		if (flag_profile != sys_profile)
+			return 1;
+		break;
+	}
+	return 0;
+}
+
+/* Note: if current is a block group, it will skip it anyway */
+static int next_block_group(struct btrfs_root *root,
+			    struct btrfs_path *path)
+{
+	struct btrfs_key key;
+	int ret = 0;
+
+	while (1) {
+		ret = btrfs_next_item(root, path);
+		if (ret)
+			goto out;
+
+		btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
+		if (key.type == BTRFS_BLOCK_GROUP_ITEM_KEY)
+			goto out;
+	}
+out:
+	return ret;
+}
+
+/* This function will cleanup  */
+static int cleanup_temp_chunks(struct btrfs_fs_info *fs_info,
+			       struct mkfs_allocation *alloc,
+			       u64 data_profile, u64 meta_profile,
+			       u64 sys_profile)
+{
+	struct btrfs_trans_handle *trans = NULL;
+	struct btrfs_block_group_item *bgi;
+	struct btrfs_root *root = fs_info->extent_root;
+	struct btrfs_key key;
+	struct btrfs_key found_key;
+	struct btrfs_path *path;
+	int ret = 0;
+
+	path = btrfs_alloc_path();
+	if (!path) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	trans = btrfs_start_transaction(root, 1);
+
+	key.objectid = 0;
+	key.type = BTRFS_BLOCK_GROUP_ITEM_KEY;
+	key.offset = 0;
+
+	while (1) {
+		/*
+		 * as the rest of the loop may modify the tree, we need to
+		 * start a new search each time.
+		 */
+		ret = btrfs_search_slot(trans, root, &key, path, 0, 0);
+		if (ret < 0)
+			goto out;
+
+		btrfs_item_key_to_cpu(path->nodes[0], &found_key,
+				      path->slots[0]);
+		if (found_key.objectid < key.objectid)
+			goto out;
+		if (found_key.type != BTRFS_BLOCK_GROUP_ITEM_KEY) {
+			ret = next_block_group(root, path);
+			if (ret < 0)
+				goto out;
+			if (ret > 0) {
+				ret = 0;
+				goto out;
+			}
+			btrfs_item_key_to_cpu(path->nodes[0], &found_key,
+					      path->slots[0]);
 		}
-	}
 
-	return !found;
-}
-
-static void process_fs_features(u64 flags)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
-		if (flags & mkfs_features[i].flag) {
-			printf("Turning ON incompat feature '%s': %s\n",
-				mkfs_features[i].name,
-				mkfs_features[i].desc);
+		bgi = btrfs_item_ptr(path->nodes[0], path->slots[0],
+				     struct btrfs_block_group_item);
+		if (is_temp_block_group(path->nodes[0], bgi,
+					data_profile, meta_profile,
+					sys_profile)) {
+			ret = btrfs_free_block_group(trans, fs_info,
+					found_key.objectid, found_key.offset);
+			if (ret < 0)
+				goto out;
 		}
+		btrfs_release_path(path);
+		key.objectid = found_key.objectid + found_key.offset;
 	}
-}
-
-
-/*
- * Return NULL if all features were parsed fine, otherwise return the name of
- * the first unparsed.
- */
-static char* parse_fs_features(char *namelist, u64 *flags)
-{
-	char *this_char;
-	char *save_ptr = NULL; /* Satisfy static checkers */
-
-	for (this_char = strtok_r(namelist, ",", &save_ptr);
-	     this_char != NULL;
-	     this_char = strtok_r(NULL, ",", &save_ptr)) {
-		if (parse_one_fs_feature(this_char, flags))
-			return this_char;
-	}
-
-	return NULL;
+out:
+	if (trans)
+		btrfs_commit_transaction(trans, root);
+	btrfs_free_path(path);
+	return ret;
 }
 
 int main(int ac, char **av)
@@ -1200,30 +1328,27 @@ int main(int ac, char **av)
 	struct btrfs_root *root;
 	struct btrfs_trans_handle *trans;
 	char *label = NULL;
-	char *first_file;
 	u64 block_count = 0;
 	u64 dev_block_count = 0;
 	u64 blocks[7];
 	u64 alloc_start = 0;
 	u64 metadata_profile = 0;
 	u64 data_profile = 0;
-	u32 leafsize = max_t(u32, sysconf(_SC_PAGESIZE),
+	u32 nodesize = max_t(u32, sysconf(_SC_PAGESIZE),
 			BTRFS_MKFS_DEFAULT_NODE_SIZE);
 	u32 sectorsize = 4096;
-	u32 nodesize = leafsize;
 	u32 stripesize = 4096;
 	int zero_end = 1;
 	int fd;
 	int ret;
 	int i;
 	int mixed = 0;
-	int leaf_forced = 0;
+	int nodesize_forced = 0;
 	int data_profile_opt = 0;
 	int metadata_profile_opt = 0;
 	int discard = 1;
 	int ssd = 0;
 	int force_overwrite = 0;
-
 	char *source_dir = NULL;
 	int source_dir_set = 0;
 	u64 num_of_meta_chunks = 0;
@@ -1231,34 +1356,36 @@ int main(int ac, char **av)
 	u64 source_dir_size = 0;
 	int dev_cnt = 0;
 	int saved_optind;
-	char estr[100];
-	char *fs_uuid = NULL;
-	u64 features = DEFAULT_MKFS_FEATURES;
+	char fs_uuid[BTRFS_UUID_UNPARSED_SIZE] = { 0 };
+	u64 features = BTRFS_MKFS_DEFAULT_FEATURES;
+	struct mkfs_allocation allocation = { 0 };
+	struct btrfs_mkfs_config mkfs_cfg;
 
 	while(1) {
 		int c;
-		int option_index = 0;
 		static const struct option long_options[] = {
-			{ "alloc-start", 1, NULL, 'A'},
-			{ "byte-count", 1, NULL, 'b' },
-			{ "force", 0, NULL, 'f' },
-			{ "leafsize", 1, NULL, 'l' },
-			{ "label", 1, NULL, 'L'},
-			{ "metadata", 1, NULL, 'm' },
-			{ "mixed", 0, NULL, 'M' },
-			{ "nodesize", 1, NULL, 'n' },
-			{ "sectorsize", 1, NULL, 's' },
-			{ "data", 1, NULL, 'd' },
-			{ "version", 0, NULL, 'V' },
-			{ "rootdir", 1, NULL, 'r' },
-			{ "nodiscard", 0, NULL, 'K' },
-			{ "features", 1, NULL, 'O' },
+			{ "alloc-start", required_argument, NULL, 'A'},
+			{ "byte-count", required_argument, NULL, 'b' },
+			{ "force", no_argument, NULL, 'f' },
+			{ "leafsize", required_argument, NULL, 'l' },
+			{ "label", required_argument, NULL, 'L'},
+			{ "metadata", required_argument, NULL, 'm' },
+			{ "mixed", no_argument, NULL, 'M' },
+			{ "nodesize", required_argument, NULL, 'n' },
+			{ "sectorsize", required_argument, NULL, 's' },
+			{ "data", required_argument, NULL, 'd' },
+			{ "version", no_argument, NULL, 'V' },
+			{ "rootdir", required_argument, NULL, 'r' },
+			{ "nodiscard", no_argument, NULL, 'K' },
+			{ "features", required_argument, NULL, 'O' },
 			{ "uuid", required_argument, NULL, 'U' },
+			{ "quiet", 0, NULL, 'q' },
+			{ "help", no_argument, NULL, GETOPT_VAL_HELP },
 			{ NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:O:r:U:VMK",
-				long_options, &option_index);
+		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:O:r:U:VMKq",
+				long_options, NULL);
 		if (c < 0)
 			break;
 		switch(c) {
@@ -1273,10 +1400,11 @@ int main(int ac, char **av)
 				data_profile_opt = 1;
 				break;
 			case 'l':
+				fprintf(stderr,
+			"WARNING: --leafsize is deprecated, use --nodesize\n");
 			case 'n':
 				nodesize = parse_size(optarg);
-				leafsize = parse_size(optarg);
-				leaf_forced = 1;
+				nodesize_forced = 1;
 				break;
 			case 'L':
 				label = parse_label(optarg);
@@ -1292,7 +1420,7 @@ int main(int ac, char **av)
 				char *orig = strdup(optarg);
 				char *tmp = orig;
 
-				tmp = parse_fs_features(tmp, &features);
+				tmp = btrfs_parse_fs_features(tmp, &features);
 				if (tmp) {
 					fprintf(stderr,
 						"Unrecognized filesystem feature '%s'\n",
@@ -1302,7 +1430,7 @@ int main(int ac, char **av)
 				}
 				free(orig);
 				if (features & BTRFS_FEATURE_LIST_ALL) {
-					list_all_fs_features();
+					btrfs_list_all_fs_features(0);
 					exit(0);
 				}
 				break;
@@ -1312,11 +1440,8 @@ int main(int ac, char **av)
 				break;
 			case 'b':
 				block_count = parse_size(optarg);
-				if (block_count <= BTRFS_MKFS_SMALL_VOLUME_SIZE) {
-					fprintf(stdout,
-				"SMALL VOLUME: forcing mixed metadata/data groups\n");
+				if (block_count <= BTRFS_MKFS_SMALL_VOLUME_SIZE)
 					mixed = 1;
-				}
 				zero_end = 0;
 				break;
 			case 'V':
@@ -1327,24 +1452,26 @@ int main(int ac, char **av)
 				source_dir_set = 1;
 				break;
 			case 'U':
-				fs_uuid = optarg;
+				strncpy(fs_uuid, optarg,
+					BTRFS_UUID_UNPARSED_SIZE - 1);
 				break;
 			case 'K':
 				discard = 0;
 				break;
+			case 'q':
+				verbose = 0;
+				break;
+			case GETOPT_VAL_HELP:
 			default:
-				print_usage();
+				print_usage(c != GETOPT_VAL_HELP);
 		}
 	}
+
 	sectorsize = max(sectorsize, (u32)sysconf(_SC_PAGESIZE));
-	if (btrfs_check_node_or_leaf_size(leafsize, sectorsize))
-		exit(1);
-	if (btrfs_check_node_or_leaf_size(nodesize, sectorsize))
-		exit(1);
 	saved_optind = optind;
 	dev_cnt = ac - optind;
 	if (dev_cnt == 0)
-		print_usage();
+		print_usage(1);
 
 	if (source_dir_set && dev_cnt > 1) {
 		fprintf(stderr,
@@ -1352,7 +1479,7 @@ int main(int ac, char **av)
 		exit(1);
 	}
 
-	if (fs_uuid) {
+	if (*fs_uuid) {
 		uuid_t dummy_uuid;
 
 		if (uuid_parse(fs_uuid, dummy_uuid) != 0) {
@@ -1367,11 +1494,9 @@ int main(int ac, char **av)
 	
 	while (dev_cnt-- > 0) {
 		file = av[optind++];
-		if (is_block_device(file))
-			if (test_dev_for_mkfs(file, force_overwrite, estr)) {
-				fprintf(stderr, "Error: %s", estr);
+		if (is_block_device(file) == 1)
+			if (test_dev_for_mkfs(file, force_overwrite))
 				exit(1);
-			}
 	}
 
 	optind = saved_optind;
@@ -1380,8 +1505,9 @@ int main(int ac, char **av)
 	file = av[optind++];
 	ssd = is_ssd(file);
 
-	if (is_vol_small(file)) {
-		printf("SMALL VOLUME: forcing mixed metadata/data groups\n");
+	if (is_vol_small(file) || mixed) {
+		if (verbose)
+			printf("SMALL VOLUME: forcing mixed metadata/data groups\n");
 		mixed = 1;
 	}
 
@@ -1391,7 +1517,7 @@ int main(int ac, char **av)
 	*/
 	if (!mixed) {
 		if (!metadata_profile_opt) {
-			if (dev_cnt == 1 && ssd)
+			if (dev_cnt == 1 && ssd && verbose)
 				printf("Detected a SSD, turning off metadata "
 				"duplication.  Mkfs with -m dup if you want to "
 				"force metadata duplication.\n");
@@ -1405,7 +1531,7 @@ int main(int ac, char **av)
 				BTRFS_BLOCK_GROUP_RAID0 : 0; /* raid0 or single */
 		}
 	} else {
-		u32 best_leafsize = max_t(u32, sysconf(_SC_PAGESIZE), sectorsize);
+		u32 best_nodesize = max_t(u32, sysconf(_SC_PAGESIZE), sectorsize);
 
 		if (metadata_profile_opt || data_profile_opt) {
 			if (metadata_profile != data_profile) {
@@ -1415,34 +1541,28 @@ int main(int ac, char **av)
 			}
 		}
 
-		if (!leaf_forced) {
-			leafsize = best_leafsize;
-			nodesize = best_leafsize;
-			if (btrfs_check_node_or_leaf_size(leafsize, sectorsize))
-				exit(1);
-		}
-		if (leafsize != sectorsize) {
-			fprintf(stderr, "Error: mixed metadata/data block groups "
-				"require metadata blocksizes equal to the sectorsize\n");
-			exit(1);
-		}
+		if (!nodesize_forced)
+			nodesize = best_nodesize;
 	}
+	if (btrfs_check_nodesize(nodesize, sectorsize,
+				 features))
+		exit(1);
 
-	/* Check device/block_count after the leafsize is determined */
-	if (block_count && block_count < btrfs_min_dev_size(leafsize)) {
+	/* Check device/block_count after the nodesize is determined */
+	if (block_count && block_count < btrfs_min_dev_size(nodesize)) {
 		fprintf(stderr,
 			"Size '%llu' is too small to make a usable filesystem\n",
 			block_count);
 		fprintf(stderr,
 			"Minimum size for btrfs filesystem is %llu\n",
-			btrfs_min_dev_size(leafsize));
+			btrfs_min_dev_size(nodesize));
 		exit(1);
 	}
 	for (i = saved_optind; i < saved_optind + dev_cnt; i++) {
 		char *path;
 
 		path = av[i];
-		ret = test_minimum_size(path, leafsize);
+		ret = test_minimum_size(path, nodesize);
 		if (ret < 0) {
 			fprintf(stderr, "Failed to check size for '%s': %s\n",
 				path, strerror(-ret));
@@ -1454,20 +1574,20 @@ int main(int ac, char **av)
 				path);
 			fprintf(stderr,
 				"Minimum size for each btrfs device is %llu.\n",
-				btrfs_min_dev_size(leafsize));
+				btrfs_min_dev_size(nodesize));
 			exit(1);
 		}
 	}
 	ret = test_num_disk_vs_raid(metadata_profile, data_profile,
-			dev_cnt, mixed, estr);
-	if (ret) {
-		fprintf(stderr, "Error: %s\n", estr);
+			dev_cnt, mixed);
+	if (ret)
 		exit(1);
-	}
 
 	/* if we are here that means all devs are good to btrfsify */
-	printf("%s\n", PACKAGE_STRING);
-	printf("See %s for more information.\n\n", PACKAGE_URL);
+	if (verbose) {
+		printf("%s\n", PACKAGE_STRING);
+		printf("See %s for more information.\n\n", PACKAGE_URL);
+	}
 
 	dev_cnt--;
 
@@ -1483,7 +1603,6 @@ int main(int ac, char **av)
 				strerror(errno));
 			exit(1);
 		}
-		first_file = file;
 		ret = btrfs_prepare_device(fd, file, zero_end, &dev_block_count,
 					   block_count, &mixed, discard);
 		if (ret) {
@@ -1501,7 +1620,6 @@ int main(int ac, char **av)
 			exit(1);
 		}
 
-		first_file = file;
 		source_dir_size = size_sourcedir(source_dir, sectorsize,
 					     &num_of_meta_chunks, &size_of_data);
 		if(block_count < source_dir_size)
@@ -1524,7 +1642,13 @@ int main(int ac, char **av)
 	blocks[0] = BTRFS_SUPER_INFO_OFFSET;
 	for (i = 1; i < 7; i++) {
 		blocks[i] = BTRFS_SUPER_INFO_OFFSET + 1024 * 1024 +
-			leafsize * i;
+			nodesize * i;
+	}
+
+	if (group_profile_max_safe_loss(metadata_profile) <
+		group_profile_max_safe_loss(data_profile)){
+		fprintf(stderr,
+			"WARNING: metatdata has lower redundancy than data!\n\n");
 	}
 
 	/*
@@ -1539,11 +1663,16 @@ int main(int ac, char **av)
 		features |= BTRFS_FEATURE_INCOMPAT_RAID56;
 	}
 
-	process_fs_features(features);
+	mkfs_cfg.label = label;
+	mkfs_cfg.fs_uuid = fs_uuid;
+	memcpy(mkfs_cfg.blocks, blocks, sizeof(blocks));
+	mkfs_cfg.num_bytes = dev_block_count;
+	mkfs_cfg.nodesize = nodesize;
+	mkfs_cfg.sectorsize = sectorsize;
+	mkfs_cfg.stripesize = stripesize;
+	mkfs_cfg.features = features;
 
-	ret = make_btrfs(fd, file, label, fs_uuid, blocks, dev_block_count,
-			 nodesize, leafsize,
-			 sectorsize, stripesize, features);
+	ret = make_btrfs(fd, &mkfs_cfg);
 	if (ret) {
 		fprintf(stderr, "error during mkfs: %s\n", strerror(-ret));
 		exit(1);
@@ -1557,15 +1686,40 @@ int main(int ac, char **av)
 	}
 	root->fs_info->alloc_start = alloc_start;
 
-	ret = make_root_dir(root, mixed);
+	ret = create_metadata_block_groups(root, mixed, &allocation);
+	if (ret) {
+		fprintf(stderr, "failed to create default block groups\n");
+		exit(1);
+	}
+
+	trans = btrfs_start_transaction(root, 1);
+	if (!trans) {
+		fprintf(stderr, "failed to start transaction\n");
+		exit(1);
+	}
+
+	ret = create_data_block_groups(trans, root, mixed, &allocation);
+	if (ret) {
+		fprintf(stderr, "failed to create default data block groups\n");
+		exit(1);
+	}
+
+	ret = make_root_dir(trans, root, mixed, &allocation);
 	if (ret) {
 		fprintf(stderr, "failed to setup the root directory\n");
 		exit(1);
 	}
 
-	trans = btrfs_start_transaction(root, 1);
+	btrfs_commit_transaction(trans, root);
 
-	btrfs_register_one_device(file);
+	trans = btrfs_start_transaction(root, 1);
+	if (!trans) {
+		fprintf(stderr, "failed to start transaction\n");
+		exit(1);
+	}
+
+	if (is_block_device(file) == 1)
+		btrfs_register_one_device(file);
 
 	if (dev_cnt == 0)
 		goto raid_groups;
@@ -1605,40 +1759,86 @@ int main(int ac, char **av)
 		ret = btrfs_add_to_fsid(trans, root, fd, file, dev_block_count,
 					sectorsize, sectorsize, sectorsize);
 		BUG_ON(ret);
-		btrfs_register_one_device(file);
+		if (verbose >= 2) {
+			struct btrfs_device *device;
+
+			device = container_of(root->fs_info->fs_devices->devices.next,
+					struct btrfs_device, dev_list);
+			printf("adding device %s id %llu\n", file,
+				(unsigned long long)device->devid);
+		}
+
+		if (is_block_device(file) == 1)
+			btrfs_register_one_device(file);
 	}
 
 raid_groups:
 	if (!source_dir_set) {
 		ret = create_raid_groups(trans, root, data_profile,
-				 data_profile_opt, metadata_profile,
-				 mixed);
+				 metadata_profile, mixed, &allocation);
 		BUG_ON(ret);
 	}
 
 	ret = create_data_reloc_tree(trans, root);
 	BUG_ON(ret);
 
-	printf("fs created label %s on %s\n\tnodesize %u leafsize %u "
-	    "sectorsize %u size %s\n",
-	    label, first_file, nodesize, leafsize, sectorsize,
-	    pretty_size(btrfs_super_total_bytes(root->fs_info->super_copy)));
-
 	btrfs_commit_transaction(trans, root);
 
 	if (source_dir_set) {
 		trans = btrfs_start_transaction(root, 1);
 		ret = create_chunks(trans, root,
-				    num_of_meta_chunks, size_of_data);
+				    num_of_meta_chunks, size_of_data,
+				    &allocation);
 		BUG_ON(ret);
 		btrfs_commit_transaction(trans, root);
 
 		ret = make_image(source_dir, root, fd);
 		BUG_ON(ret);
 	}
+	ret = cleanup_temp_chunks(root->fs_info, &allocation, data_profile,
+				  metadata_profile, metadata_profile);
+	if (ret < 0) {
+		fprintf(stderr, "Failed to cleanup temporary chunks\n");
+		goto out;
+	}
 
+	if (verbose) {
+		char features_buf[64];
+
+		printf("Label:              %s\n", label);
+		printf("UUID:               %s\n", fs_uuid);
+		printf("Node size:          %u\n", nodesize);
+		printf("Sector size:        %u\n", sectorsize);
+		printf("Filesystem size:    %s\n",
+			pretty_size(btrfs_super_total_bytes(root->fs_info->super_copy)));
+		printf("Block group profiles:\n");
+		if (allocation.data)
+			printf("  Data:             %-8s %16s\n",
+				btrfs_group_profile_str(data_profile),
+				pretty_size(allocation.data));
+		if (allocation.metadata)
+			printf("  Metadata:         %-8s %16s\n",
+				btrfs_group_profile_str(metadata_profile),
+				pretty_size(allocation.metadata));
+		if (allocation.mixed)
+			printf("  Data+Metadata:    %-8s %16s\n",
+				btrfs_group_profile_str(data_profile),
+				pretty_size(allocation.mixed));
+		printf("  System:           %-8s %16s\n",
+			btrfs_group_profile_str(metadata_profile),
+			pretty_size(allocation.system));
+		printf("SSD detected:       %s\n", ssd ? "yes" : "no");
+		btrfs_parse_features_to_string(features_buf, features);
+		printf("Incompat features:  %s", features_buf);
+		printf("\n");
+
+		list_all_devices(root);
+	}
+
+out:
 	ret = close_ctree(root);
 	BUG_ON(ret);
+	btrfs_close_all_devices();
 	free(label);
 	return 0;
 }

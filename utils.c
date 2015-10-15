@@ -35,6 +35,8 @@
 #include <limits.h>
 #include <blkid/blkid.h>
 #include <sys/vfs.h>
+#include <sys/statfs.h>
+#include <linux/magic.h>
 
 #include "kerncompat.h"
 #include "radix-tree.h"
@@ -53,6 +55,11 @@
 static int btrfs_scan_done = 0;
 
 static char argv0_buf[ARGV0_BUF_SIZE] = "btrfs";
+
+const char *get_argv0_buf(void)
+{
+	return argv0_buf;
+}
 
 void fixup_argv0(char **argv, const char *token)
 {
@@ -169,9 +176,10 @@ int test_uuid_unique(char *fs_uuid)
 	return unique;
 }
 
-int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
-	       u64 blocks[7], u64 num_bytes, u32 nodesize,
-	       u32 leafsize, u32 sectorsize, u32 stripesize, u64 features)
+/*
+ * @fs_uuid - if NULL, generates a UUID, returns back the new filesystem UUID
+ */
+int make_btrfs(int fd, struct btrfs_mkfs_config *cfg)
 {
 	struct btrfs_super_block super;
 	struct extent_buffer *buf = NULL;
@@ -192,57 +200,61 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	u64 ref_root;
 	u32 array_size;
 	u32 item_size;
-	int skinny_metadata = !!(features &
+	int skinny_metadata = !!(cfg->features &
 				 BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA);
+	u64 num_bytes;
 
-	first_free = BTRFS_SUPER_INFO_OFFSET + sectorsize * 2 - 1;
-	first_free &= ~((u64)sectorsize - 1);
+	first_free = BTRFS_SUPER_INFO_OFFSET + cfg->sectorsize * 2 - 1;
+	first_free &= ~((u64)cfg->sectorsize - 1);
 
 	memset(&super, 0, sizeof(super));
 
-	num_bytes = (num_bytes / sectorsize) * sectorsize;
-	if (fs_uuid) {
-		if (uuid_parse(fs_uuid, super.fsid) != 0) {
-			fprintf(stderr, "could not parse UUID: %s\n", fs_uuid);
+	num_bytes = (cfg->num_bytes / cfg->sectorsize) * cfg->sectorsize;
+	if (cfg->fs_uuid && *cfg->fs_uuid) {
+		if (uuid_parse(cfg->fs_uuid, super.fsid) != 0) {
+			fprintf(stderr, "could not parse UUID: %s\n",
+				cfg->fs_uuid);
 			ret = -EINVAL;
 			goto out;
 		}
-		if (!test_uuid_unique(fs_uuid)) {
-			fprintf(stderr, "non-unique UUID: %s\n", fs_uuid);
+		if (!test_uuid_unique(cfg->fs_uuid)) {
+			fprintf(stderr, "non-unique UUID: %s\n", cfg->fs_uuid);
 			ret = -EBUSY;
 			goto out;
 		}
 	} else {
 		uuid_generate(super.fsid);
+		if (cfg->fs_uuid)
+			uuid_unparse(super.fsid, cfg->fs_uuid);
 	}
 	uuid_generate(super.dev_item.uuid);
 	uuid_generate(chunk_tree_uuid);
 
-	btrfs_set_super_bytenr(&super, blocks[0]);
+	btrfs_set_super_bytenr(&super, cfg->blocks[0]);
 	btrfs_set_super_num_devices(&super, 1);
 	btrfs_set_super_magic(&super, BTRFS_MAGIC);
 	btrfs_set_super_generation(&super, 1);
-	btrfs_set_super_root(&super, blocks[1]);
-	btrfs_set_super_chunk_root(&super, blocks[3]);
+	btrfs_set_super_root(&super, cfg->blocks[1]);
+	btrfs_set_super_chunk_root(&super, cfg->blocks[3]);
 	btrfs_set_super_total_bytes(&super, num_bytes);
-	btrfs_set_super_bytes_used(&super, 6 * leafsize);
-	btrfs_set_super_sectorsize(&super, sectorsize);
-	btrfs_set_super_leafsize(&super, leafsize);
-	btrfs_set_super_nodesize(&super, nodesize);
-	btrfs_set_super_stripesize(&super, stripesize);
+	btrfs_set_super_bytes_used(&super, 6 * cfg->nodesize);
+	btrfs_set_super_sectorsize(&super, cfg->sectorsize);
+	btrfs_set_super_leafsize(&super, cfg->nodesize);
+	btrfs_set_super_nodesize(&super, cfg->nodesize);
+	btrfs_set_super_stripesize(&super, cfg->stripesize);
 	btrfs_set_super_csum_type(&super, BTRFS_CSUM_TYPE_CRC32);
 	btrfs_set_super_chunk_root_generation(&super, 1);
 	btrfs_set_super_cache_generation(&super, -1);
-	btrfs_set_super_incompat_flags(&super, features);
-	if (label)
-		strncpy(super.label, label, BTRFS_LABEL_SIZE - 1);
+	btrfs_set_super_incompat_flags(&super, cfg->features);
+	if (cfg->label)
+		strncpy(super.label, cfg->label, BTRFS_LABEL_SIZE - 1);
 
-	buf = malloc(sizeof(*buf) + max(sectorsize, leafsize));
+	buf = malloc(sizeof(*buf) + max(cfg->sectorsize, cfg->nodesize));
 
 	/* create the tree of root objects */
-	memset(buf->data, 0, leafsize);
-	buf->len = leafsize;
-	btrfs_set_header_bytenr(buf, blocks[1]);
+	memset(buf->data, 0, cfg->nodesize);
+	buf->len = cfg->nodesize;
+	btrfs_set_header_bytenr(buf, cfg->blocks[1]);
 	btrfs_set_header_nritems(buf, 4);
 	btrfs_set_header_generation(buf, 1);
 	btrfs_set_header_backref_rev(buf, BTRFS_MIXED_BACKREF_REV);
@@ -260,10 +272,10 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	btrfs_set_stack_inode_generation(inode_item, 1);
 	btrfs_set_stack_inode_size(inode_item, 3);
 	btrfs_set_stack_inode_nlink(inode_item, 1);
-	btrfs_set_stack_inode_nbytes(inode_item, leafsize);
+	btrfs_set_stack_inode_nbytes(inode_item, cfg->nodesize);
 	btrfs_set_stack_inode_mode(inode_item, S_IFDIR | 0755);
 	btrfs_set_root_refs(&root_item, 1);
-	btrfs_set_root_used(&root_item, leafsize);
+	btrfs_set_root_used(&root_item, cfg->nodesize);
 	btrfs_set_root_generation(&root_item, 1);
 
 	memset(&disk_key, 0, sizeof(disk_key));
@@ -271,8 +283,8 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	btrfs_set_disk_key_offset(&disk_key, 0);
 	nritems = 0;
 
-	itemoff = __BTRFS_LEAF_DATA_SIZE(leafsize) - sizeof(root_item);
-	btrfs_set_root_bytenr(&root_item, blocks[2]);
+	itemoff = __BTRFS_LEAF_DATA_SIZE(cfg->nodesize) - sizeof(root_item);
+	btrfs_set_root_bytenr(&root_item, cfg->blocks[2]);
 	btrfs_set_disk_key_objectid(&disk_key, BTRFS_EXTENT_TREE_OBJECTID);
 	btrfs_set_item_key(buf, &disk_key, nritems);
 	btrfs_set_item_offset(buf, btrfs_item_nr(nritems), itemoff);
@@ -283,7 +295,7 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	nritems++;
 
 	itemoff = itemoff - sizeof(root_item);
-	btrfs_set_root_bytenr(&root_item, blocks[4]);
+	btrfs_set_root_bytenr(&root_item, cfg->blocks[4]);
 	btrfs_set_disk_key_objectid(&disk_key, BTRFS_DEV_TREE_OBJECTID);
 	btrfs_set_item_key(buf, &disk_key, nritems);
 	btrfs_set_item_offset(buf, btrfs_item_nr(nritems), itemoff);
@@ -295,7 +307,7 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	nritems++;
 
 	itemoff = itemoff - sizeof(root_item);
-	btrfs_set_root_bytenr(&root_item, blocks[5]);
+	btrfs_set_root_bytenr(&root_item, cfg->blocks[5]);
 	btrfs_set_disk_key_objectid(&disk_key, BTRFS_FS_TREE_OBJECTID);
 	btrfs_set_item_key(buf, &disk_key, nritems);
 	btrfs_set_item_offset(buf, btrfs_item_nr(nritems), itemoff);
@@ -307,7 +319,7 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	nritems++;
 
 	itemoff = itemoff - sizeof(root_item);
-	btrfs_set_root_bytenr(&root_item, blocks[6]);
+	btrfs_set_root_bytenr(&root_item, cfg->blocks[6]);
 	btrfs_set_disk_key_objectid(&disk_key, BTRFS_CSUM_TREE_OBJECTID);
 	btrfs_set_item_key(buf, &disk_key, nritems);
 	btrfs_set_item_offset(buf, btrfs_item_nr(nritems), itemoff);
@@ -320,28 +332,28 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 
 
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[1]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[1]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 
 	/* create the items for the extent tree */
-	memset(buf->data+sizeof(struct btrfs_header), 0,
-		leafsize-sizeof(struct btrfs_header));
+	memset(buf->data + sizeof(struct btrfs_header), 0,
+		cfg->nodesize - sizeof(struct btrfs_header));
 	nritems = 0;
-	itemoff = __BTRFS_LEAF_DATA_SIZE(leafsize);
+	itemoff = __BTRFS_LEAF_DATA_SIZE(cfg->nodesize);
 	for (i = 1; i < 7; i++) {
 		item_size = sizeof(struct btrfs_extent_item);
 		if (!skinny_metadata)
 			item_size += sizeof(struct btrfs_tree_block_info);
 
-		BUG_ON(blocks[i] < first_free);
-		BUG_ON(blocks[i] < blocks[i - 1]);
+		BUG_ON(cfg->blocks[i] < first_free);
+		BUG_ON(cfg->blocks[i] < cfg->blocks[i - 1]);
 
 		/* create extent item */
 		itemoff -= item_size;
-		btrfs_set_disk_key_objectid(&disk_key, blocks[i]);
+		btrfs_set_disk_key_objectid(&disk_key, cfg->blocks[i]);
 		if (skinny_metadata) {
 			btrfs_set_disk_key_type(&disk_key,
 						BTRFS_METADATA_ITEM_KEY);
@@ -349,7 +361,7 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 		} else {
 			btrfs_set_disk_key_type(&disk_key,
 						BTRFS_EXTENT_ITEM_KEY);
-			btrfs_set_disk_key_offset(&disk_key, leafsize);
+			btrfs_set_disk_key_offset(&disk_key, cfg->nodesize);
 		}
 		btrfs_set_item_key(buf, &disk_key, nritems);
 		btrfs_set_item_offset(buf, btrfs_item_nr(nritems),
@@ -366,7 +378,7 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 
 		/* create extent ref */
 		ref_root = reference_root_table[i];
-		btrfs_set_disk_key_objectid(&disk_key, blocks[i]);
+		btrfs_set_disk_key_objectid(&disk_key, cfg->blocks[i]);
 		btrfs_set_disk_key_offset(&disk_key, ref_root);
 		btrfs_set_disk_key_type(&disk_key, BTRFS_TREE_BLOCK_REF_KEY);
 		btrfs_set_item_key(buf, &disk_key, nritems);
@@ -375,22 +387,22 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 		btrfs_set_item_size(buf, btrfs_item_nr(nritems), 0);
 		nritems++;
 	}
-	btrfs_set_header_bytenr(buf, blocks[2]);
+	btrfs_set_header_bytenr(buf, cfg->blocks[2]);
 	btrfs_set_header_owner(buf, BTRFS_EXTENT_TREE_OBJECTID);
 	btrfs_set_header_nritems(buf, nritems);
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[2]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[2]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 
 	/* create the chunk tree */
-	memset(buf->data+sizeof(struct btrfs_header), 0,
-		leafsize-sizeof(struct btrfs_header));
+	memset(buf->data + sizeof(struct btrfs_header), 0,
+		cfg->nodesize - sizeof(struct btrfs_header));
 	nritems = 0;
 	item_size = sizeof(*dev_item);
-	itemoff = __BTRFS_LEAF_DATA_SIZE(leafsize) - item_size;
+	itemoff = __BTRFS_LEAF_DATA_SIZE(cfg->nodesize) - item_size;
 
 	/* first device 1 (there is no device 0) */
 	btrfs_set_disk_key_objectid(&disk_key, BTRFS_DEV_ITEMS_OBJECTID);
@@ -406,9 +418,9 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	btrfs_set_device_total_bytes(buf, dev_item, num_bytes);
 	btrfs_set_device_bytes_used(buf, dev_item,
 				    BTRFS_MKFS_SYSTEM_GROUP_SIZE);
-	btrfs_set_device_io_align(buf, dev_item, sectorsize);
-	btrfs_set_device_io_width(buf, dev_item, sectorsize);
-	btrfs_set_device_sector_size(buf, dev_item, sectorsize);
+	btrfs_set_device_io_align(buf, dev_item, cfg->sectorsize);
+	btrfs_set_device_io_width(buf, dev_item, cfg->sectorsize);
+	btrfs_set_device_sector_size(buf, dev_item, cfg->sectorsize);
 	btrfs_set_device_type(buf, dev_item, 0);
 
 	write_extent_buffer(buf, super.dev_item.uuid,
@@ -437,9 +449,9 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	btrfs_set_chunk_owner(buf, chunk, BTRFS_EXTENT_TREE_OBJECTID);
 	btrfs_set_chunk_stripe_len(buf, chunk, 64 * 1024);
 	btrfs_set_chunk_type(buf, chunk, BTRFS_BLOCK_GROUP_SYSTEM);
-	btrfs_set_chunk_io_align(buf, chunk, sectorsize);
-	btrfs_set_chunk_io_width(buf, chunk, sectorsize);
-	btrfs_set_chunk_sector_size(buf, chunk, sectorsize);
+	btrfs_set_chunk_io_align(buf, chunk, cfg->sectorsize);
+	btrfs_set_chunk_io_width(buf, chunk, cfg->sectorsize);
+	btrfs_set_chunk_sector_size(buf, chunk, cfg->sectorsize);
 	btrfs_set_chunk_num_stripes(buf, chunk, 1);
 	btrfs_set_stripe_devid_nr(buf, chunk, 0, 1);
 	btrfs_set_stripe_offset_nr(buf, chunk, 0, 0);
@@ -462,21 +474,21 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 	ptr += item_size;
 	btrfs_set_super_sys_array_size(&super, array_size);
 
-	btrfs_set_header_bytenr(buf, blocks[3]);
+	btrfs_set_header_bytenr(buf, cfg->blocks[3]);
 	btrfs_set_header_owner(buf, BTRFS_CHUNK_TREE_OBJECTID);
 	btrfs_set_header_nritems(buf, nritems);
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[3]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[3]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 
 	/* create the device tree */
-	memset(buf->data+sizeof(struct btrfs_header), 0,
-		leafsize-sizeof(struct btrfs_header));
+	memset(buf->data + sizeof(struct btrfs_header), 0,
+		cfg->nodesize - sizeof(struct btrfs_header));
 	nritems = 0;
-	itemoff = __BTRFS_LEAF_DATA_SIZE(leafsize) -
+	itemoff = __BTRFS_LEAF_DATA_SIZE(cfg->nodesize) -
 		sizeof(struct btrfs_dev_extent);
 
 	btrfs_set_disk_key_objectid(&disk_key, 1);
@@ -501,49 +513,49 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 				    BTRFS_MKFS_SYSTEM_GROUP_SIZE);
 	nritems++;
 
-	btrfs_set_header_bytenr(buf, blocks[4]);
+	btrfs_set_header_bytenr(buf, cfg->blocks[4]);
 	btrfs_set_header_owner(buf, BTRFS_DEV_TREE_OBJECTID);
 	btrfs_set_header_nritems(buf, nritems);
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[4]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[4]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 
 	/* create the FS root */
-	memset(buf->data+sizeof(struct btrfs_header), 0,
-		leafsize-sizeof(struct btrfs_header));
-	btrfs_set_header_bytenr(buf, blocks[5]);
+	memset(buf->data + sizeof(struct btrfs_header), 0,
+		cfg->nodesize - sizeof(struct btrfs_header));
+	btrfs_set_header_bytenr(buf, cfg->blocks[5]);
 	btrfs_set_header_owner(buf, BTRFS_FS_TREE_OBJECTID);
 	btrfs_set_header_nritems(buf, 0);
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[5]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[5]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 	/* finally create the csum root */
-	memset(buf->data+sizeof(struct btrfs_header), 0,
-		leafsize-sizeof(struct btrfs_header));
-	btrfs_set_header_bytenr(buf, blocks[6]);
+	memset(buf->data + sizeof(struct btrfs_header), 0,
+		cfg->nodesize - sizeof(struct btrfs_header));
+	btrfs_set_header_bytenr(buf, cfg->blocks[6]);
 	btrfs_set_header_owner(buf, BTRFS_CSUM_TREE_OBJECTID);
 	btrfs_set_header_nritems(buf, 0);
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, leafsize, blocks[6]);
-	if (ret != leafsize) {
+	ret = pwrite(fd, buf->data, cfg->nodesize, cfg->blocks[6]);
+	if (ret != cfg->nodesize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
 
 	/* and write out the super block */
-	BUG_ON(sizeof(super) > sectorsize);
-	memset(buf->data, 0, sectorsize);
+	BUG_ON(sizeof(super) > cfg->sectorsize);
+	memset(buf->data, 0, cfg->sectorsize);
 	memcpy(buf->data, &super, sizeof(super));
-	buf->len = sectorsize;
+	buf->len = cfg->sectorsize;
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, sectorsize, blocks[0]);
-	if (ret != sectorsize) {
+	ret = pwrite(fd, buf->data, cfg->sectorsize, cfg->blocks[0]);
+	if (ret != cfg->sectorsize) {
 		ret = (ret < 0 ? -errno : -EIO);
 		goto out;
 	}
@@ -553,6 +565,111 @@ int make_btrfs(int fd, const char *device, const char *label, char *fs_uuid,
 out:
 	free(buf);
 	return ret;
+}
+
+static const struct btrfs_fs_feature {
+	const char *name;
+	u64 flag;
+	const char *desc;
+} mkfs_features[] = {
+	{ "mixed-bg", BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS,
+		"mixed data and metadata block groups" },
+	{ "extref", BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF,
+		"increased hardlink limit per file to 65536" },
+	{ "raid56", BTRFS_FEATURE_INCOMPAT_RAID56,
+		"raid56 extended format" },
+	{ "skinny-metadata", BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA,
+		"reduced-size metadata extent refs" },
+	{ "no-holes", BTRFS_FEATURE_INCOMPAT_NO_HOLES,
+		"no explicit hole extents for files" },
+	/* Keep this one last */
+	{ "list-all", BTRFS_FEATURE_LIST_ALL, NULL }
+};
+
+static int parse_one_fs_feature(const char *name, u64 *flags)
+{
+	int i;
+	int found = 0;
+
+	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
+		if (name[0] == '^' &&
+			!strcmp(mkfs_features[i].name, name + 1)) {
+			*flags &= ~ mkfs_features[i].flag;
+			found = 1;
+		} else if (!strcmp(mkfs_features[i].name, name)) {
+			*flags |= mkfs_features[i].flag;
+			found = 1;
+		}
+	}
+
+	return !found;
+}
+
+void btrfs_parse_features_to_string(char *buf, u64 flags)
+{
+	int i;
+
+	buf[0] = 0;
+
+	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
+		if (flags & mkfs_features[i].flag) {
+			if (*buf)
+				strcat(buf, ", ");
+			strcat(buf, mkfs_features[i].name);
+		}
+	}
+}
+
+void btrfs_process_fs_features(u64 flags)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
+		if (flags & mkfs_features[i].flag) {
+			printf("Turning ON incompat feature '%s': %s\n",
+				mkfs_features[i].name,
+				mkfs_features[i].desc);
+		}
+	}
+}
+
+void btrfs_list_all_fs_features(u64 mask_disallowed)
+{
+	int i;
+
+	fprintf(stderr, "Filesystem features available:\n");
+	for (i = 0; i < ARRAY_SIZE(mkfs_features) - 1; i++) {
+		char *is_default = "";
+
+		if (mkfs_features[i].flag & mask_disallowed)
+			continue;
+		if (mkfs_features[i].flag & BTRFS_MKFS_DEFAULT_FEATURES)
+			is_default = ", default";
+		fprintf(stderr, "%-20s- %s (0x%llx%s)\n",
+				mkfs_features[i].name,
+				mkfs_features[i].desc,
+				mkfs_features[i].flag,
+				is_default);
+	}
+}
+
+/*
+ * Return NULL if all features were parsed fine, otherwise return the name of
+ * the first unparsed.
+ */
+char* btrfs_parse_fs_features(char *namelist, u64 *flags)
+{
+	char *this_char;
+	char *save_ptr = NULL; /* Satisfy static checkers */
+
+	for (this_char = strtok_r(namelist, ",", &save_ptr);
+	     this_char != NULL;
+	     this_char = strtok_r(NULL, ",", &save_ptr)) {
+		if (parse_one_fs_feature(this_char, flags))
+			return this_char;
+	}
+
+	return NULL;
 }
 
 u64 btrfs_device_size(int fd, struct stat *st)
@@ -614,21 +731,18 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	struct btrfs_super_block *super = root->fs_info->super_copy;
 	struct btrfs_device *device;
 	struct btrfs_dev_item *dev_item;
-	char *buf;
+	char *buf = NULL;
 	u64 total_bytes;
 	u64 num_devs;
 	int ret;
 
 	device = kzalloc(sizeof(*device), GFP_NOFS);
 	if (!device)
-		return -ENOMEM;
-	buf = kmalloc(sectorsize, GFP_NOFS);
-	if (!buf) {
-		kfree(device);
-		return -ENOMEM;
-	}
+		goto err_nomem;
+	buf = kzalloc(sectorsize, GFP_NOFS);
+	if (!buf)
+		goto err_nomem;
 	BUG_ON(sizeof(*disk_super) > sectorsize);
-	memset(buf, 0, sectorsize);
 
 	disk_super = (struct btrfs_super_block *)buf;
 	dev_item = &disk_super->dev_item;
@@ -645,6 +759,9 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	device->bytes_used = 0;
 	device->total_ios = 0;
 	device->dev_root = root->fs_info->dev_root;
+	device->name = strdup(path);
+	if (!device->name)
+		goto err_nomem;
 
 	ret = btrfs_add_device(trans, root, device);
 	BUG_ON(ret);
@@ -656,9 +773,6 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	btrfs_set_super_num_devices(super, num_devs);
 
 	memcpy(disk_super, super, sizeof(*disk_super));
-
-	printf("adding device %s id %llu\n", path,
-	       (unsigned long long)device->devid);
 
 	btrfs_set_super_bytenr(disk_super, BTRFS_SUPER_INFO_OFFSET);
 	btrfs_set_stack_device_id(dev_item, device->devid);
@@ -677,42 +791,59 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	list_add(&device->dev_list, &root->fs_info->fs_devices->devices);
 	device->fs_devices = root->fs_info->fs_devices;
 	return 0;
+
+err_nomem:
+	kfree(device);
+	kfree(buf);
+	return -ENOMEM;
 }
 
-static void btrfs_wipe_existing_sb(int fd)
+static int btrfs_wipe_existing_sb(int fd)
 {
 	const char *off = NULL;
 	size_t len = 0;
 	loff_t offset;
 	char buf[BUFSIZ];
-	int rc = 0;
+	int ret = 0;
 	blkid_probe pr = NULL;
 
 	pr = blkid_new_probe();
 	if (!pr)
-		return;
+		return -1;
 
-	if (blkid_probe_set_device(pr, fd, 0, 0))
+	if (blkid_probe_set_device(pr, fd, 0, 0)) {
+		ret = -1;
 		goto out;
+	}
 
-	rc = blkid_probe_lookup_value(pr, "SBMAGIC_OFFSET", &off, NULL);
-	if (!rc)
-		rc = blkid_probe_lookup_value(pr, "SBMAGIC", NULL, &len);
+	ret = blkid_probe_lookup_value(pr, "SBMAGIC_OFFSET", &off, NULL);
+	if (!ret)
+		ret = blkid_probe_lookup_value(pr, "SBMAGIC", NULL, &len);
 
-	if (rc || len == 0 || off == NULL)
+	if (ret || len == 0 || off == NULL) {
+		/*
+		 * If lookup fails, the probe did not find any values, eg. for
+		 * a file image or a loop device. Soft error.
+		 */
+		ret = 1;
 		goto out;
+	}
 
 	offset = strtoll(off, NULL, 10);
 	if (len > sizeof(buf))
 		len = sizeof(buf);
 
 	memset(buf, 0, len);
-	rc = pwrite(fd, buf, len, offset);
+	ret = pwrite(fd, buf, len, offset);
+	if (ret != len) {
+		fprintf(stderr, "ERROR: cannot wipe existing superblock\n");
+		ret = -1;
+	}
 	fsync(fd);
 
 out:
 	blkid_free_probe(pr);
-	return;
+	return ret;
 }
 
 int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
@@ -766,7 +897,12 @@ int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
 		return 1;
 	}
 
-	btrfs_wipe_existing_sb(fd);
+	ret = btrfs_wipe_existing_sb(fd);
+	if (ret < 0) {
+		fprintf(stderr, "ERROR: cannot wipe superblocks on '%s'\n",
+				file);
+		return 1;
+	}
 
 	*block_count_ret = block_count;
 	return 0;
@@ -783,7 +919,7 @@ int btrfs_make_root_dir(struct btrfs_trans_handle *trans,
 	btrfs_set_stack_inode_generation(&inode_item, trans->transid);
 	btrfs_set_stack_inode_size(&inode_item, 0);
 	btrfs_set_stack_inode_nlink(&inode_item, 1);
-	btrfs_set_stack_inode_nbytes(&inode_item, root->leafsize);
+	btrfs_set_stack_inode_nbytes(&inode_item, root->nodesize);
 	btrfs_set_stack_inode_mode(&inode_item, S_IFDIR | 0755);
 	btrfs_set_stack_timespec_sec(&inode_item.atime, now);
 	btrfs_set_stack_timespec_nsec(&inode_item.atime, 0);
@@ -823,7 +959,7 @@ int is_block_device(const char *path)
 	if (stat(path, &statbuf) < 0)
 		return -errno;
 
-	return S_ISBLK(statbuf.st_mode);
+	return !!S_ISBLK(statbuf.st_mode);
 }
 
 /*
@@ -947,10 +1083,11 @@ out:
  */
 int open_path_or_dev_mnt(const char *path, DIR **dirstream)
 {
-	char mp[BTRFS_PATH_NAME_MAX + 1];
+	char mp[PATH_MAX];
 	int fdmnt;
 
-	if (is_block_device(path)) {
+	fdmnt = is_block_device(path);
+	if (fdmnt == 1) {
 		int ret;
 
 		ret = get_btrfs_mount(path, mp, sizeof(mp));
@@ -960,11 +1097,65 @@ int open_path_or_dev_mnt(const char *path, DIR **dirstream)
 			return -1;
 		}
 		fdmnt = open_file_or_dir(mp, dirstream);
-	} else {
+	} else if (fdmnt == 0) {
 		fdmnt = open_file_or_dir(path, dirstream);
 	}
 
 	return fdmnt;
+}
+
+/*
+ * Do the following checks before calling open_file_or_dir():
+ * 1: path is in a btrfs filesystem
+ * 2: path is a directory
+ */
+int btrfs_open_dir(const char *path, DIR **dirstream, int verbose)
+{
+	struct statfs stfs;
+	struct stat st;
+	int ret;
+
+	if (statfs(path, &stfs) != 0) {
+		if (verbose)
+			fprintf(stderr,
+				"ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
+		return -1;
+	}
+
+	if (stfs.f_type != BTRFS_SUPER_MAGIC) {
+		if (verbose)
+			fprintf(stderr,
+				"ERROR: not a btrfs filesystem: %s\n",
+				path);
+		return -2;
+	}
+
+	if (stat(path, &st) != 0) {
+		if (verbose)
+			fprintf(stderr,
+				"ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
+		return -1;
+	}
+
+	if (!S_ISDIR(st.st_mode)) {
+		if (verbose)
+			fprintf(stderr,
+				"ERROR: not a directory: %s\n",
+				path);
+		return -3;
+	}
+
+	ret = open_file_or_dir(path, dirstream);
+	if (ret < 0) {
+		if (verbose)
+			fprintf(stderr,
+				"ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
+	}
+
+	return ret;
 }
 
 /* checks if a device is a loop device */
@@ -1296,8 +1487,8 @@ int btrfs_register_one_device(const char *fname)
 			strerror(errno));
 		return -errno;
 	}
-	strncpy(args.name, fname, BTRFS_PATH_NAME_MAX);
-	args.name[BTRFS_PATH_NAME_MAX-1] = 0;
+	memset(&args, 0, sizeof(args));
+	strncpy_null(args.name, fname);
 	ret = ioctl(fd, BTRFS_IOC_SCAN_DEV, &args);
 	e = errno;
 	if (ret < 0) {
@@ -1363,6 +1554,24 @@ int btrfs_device_already_in_root(struct btrfs_root *root, int fd,
 brelse:
 	free(buf);
 out:
+	return ret;
+}
+
+/*
+ * Note: this function uses a static per-thread buffer. Do not call this
+ * function more than 10 times within one argument list!
+ */
+const char *pretty_size_mode(u64 size, unsigned mode)
+{
+	static __thread int ps_index = 0;
+	static __thread char ps_array[10][32];
+	char *ret;
+
+	ret = ps_array[ps_index];
+	ps_index++;
+	ps_index %= 10;
+	(void)pretty_size_snprintf(size, ret, 32, mode);
+
 	return ret;
 }
 
@@ -1532,7 +1741,7 @@ static int set_label_mounted(const char *mount_path, const char *label)
 	return 0;
 }
 
-static int get_label_unmounted(const char *dev, char *label)
+int get_label_unmounted(const char *dev, char *label)
 {
 	struct btrfs_root *root;
 	int ret;
@@ -1541,11 +1750,6 @@ static int get_label_unmounted(const char *dev, char *label)
 	if (ret < 0) {
 	       fprintf(stderr, "FATAL: error checking %s mount status\n", dev);
 	       return -1;
-	}
-	if (ret > 0) {
-		fprintf(stderr, "ERROR: dev %s is mounted, use mount point\n",
-			dev);
-		return -1;
 	}
 
 	/* Open the super_block at the default location
@@ -1571,6 +1775,7 @@ int get_label_mounted(const char *mount_path, char *labelp)
 {
 	char label[BTRFS_LABEL_SIZE];
 	int fd;
+	int ret;
 
 	fd = open(mount_path, O_RDONLY | O_NOATIME);
 	if (fd < 0) {
@@ -1579,10 +1784,14 @@ int get_label_mounted(const char *mount_path, char *labelp)
 	}
 
 	memset(label, '\0', sizeof(label));
-	if (ioctl(fd, BTRFS_IOC_GET_FSLABEL, label) < 0) {
-		fprintf(stderr, "ERROR: unable get label %s\n", strerror(errno));
+	ret = ioctl(fd, BTRFS_IOC_GET_FSLABEL, label);
+	if (ret < 0) {
+		if (errno != ENOTTY)
+			fprintf(stderr, "ERROR: unable to get label %s\n",
+					strerror(errno));
+		ret = -errno;
 		close(fd);
-		return -1;
+		return ret;
 	}
 
 	strncpy(labelp, label, sizeof(label));
@@ -1617,94 +1826,6 @@ int set_label(const char *btrfs_dev, const char *label)
 		ret = set_label_unmounted(btrfs_dev, label);
 
 	return ret;
-}
-
-int btrfs_scan_block_devices(int run_ioctl)
-{
-
-	struct stat st;
-	int ret;
-	int fd;
-	struct btrfs_fs_devices *tmp_devices;
-	u64 num_devices;
-	FILE *proc_partitions;
-	int i;
-	char buf[1024];
-	char fullpath[110];
-	int scans = 0;
-	int special;
-
-scan_again:
-	proc_partitions = fopen("/proc/partitions","r");
-	if (!proc_partitions) {
-		fprintf(stderr, "Unable to open '/proc/partitions' for scanning\n");
-		return -ENOENT;
-	}
-	/* skip the header */
-	for (i = 0; i < 2; i++)
-		if (!fgets(buf, 1023, proc_partitions)) {
-			fprintf(stderr,
-				"Unable to read '/proc/partitions' for scanning\n");
-			fclose(proc_partitions);
-			return -ENOENT;
-		}
-
-	strcpy(fullpath,"/dev/");
-	while(fgets(buf, 1023, proc_partitions)) {
-		ret = sscanf(buf," %*d %*d %*d %99s", fullpath + 5);
-		if (ret != 1) {
-			fprintf(stderr,
-				"failed to scan device name from /proc/partitions\n");
-			break;
-		}
-
-		/*
-		 * multipath and MD devices may register as a btrfs filesystem
-		 * both through the original block device and through
-		 * the special (/dev/mapper or /dev/mdX) entry.
-		 * This scans the special entries last
-		 */
-		special = strncmp(fullpath, "/dev/dm-", strlen("/dev/dm-")) == 0;
-		if (!special)
-			special = strncmp(fullpath, "/dev/md", strlen("/dev/md")) == 0;
-
-		if (scans == 0 && special)
-			continue;
-		if (scans > 0 && !special)
-			continue;
-
-		ret = lstat(fullpath, &st);
-		if (ret < 0) {
-			fprintf(stderr, "failed to stat %s\n", fullpath);
-			continue;
-		}
-		if (!S_ISBLK(st.st_mode)) {
-			continue;
-		}
-
-		fd = open(fullpath, O_RDONLY);
-		if (fd < 0) {
-			if (errno != ENOMEDIUM)
-				fprintf(stderr, "failed to open %s: %s\n",
-					fullpath, strerror(errno));
-			continue;
-		}
-		ret = btrfs_scan_one_device(fd, fullpath, &tmp_devices,
-					    &num_devices,
-					    BTRFS_SUPER_INFO_OFFSET, 0);
-		if (ret == 0 && run_ioctl > 0) {
-			btrfs_register_one_device(fullpath);
-		}
-		close(fd);
-	}
-
-	fclose(proc_partitions);
-
-	if (scans == 0) {
-		scans++;
-		goto scan_again;
-	}
-	return 0;
 }
 
 /*
@@ -1890,8 +2011,10 @@ int open_file_or_dir3(const char *fname, DIR **dirstream, int open_flags)
 	}
 	if (fd < 0) {
 		fd = -1;
-		if (*dirstream)
+		if (*dirstream) {
 			closedir(*dirstream);
+			*dirstream = NULL;
+		}
 	}
 	return fd;
 }
@@ -2011,12 +2134,12 @@ int get_fs_info(char *path, struct btrfs_ioctl_fs_info_args *fi_args,
 	struct btrfs_fs_devices *fs_devices_mnt = NULL;
 	struct btrfs_ioctl_dev_info_args *di_args;
 	struct btrfs_ioctl_dev_info_args tmp;
-	char mp[BTRFS_PATH_NAME_MAX + 1];
+	char mp[PATH_MAX];
 	DIR *dirstream = NULL;
 
 	memset(fi_args, 0, sizeof(*fi_args));
 
-	if (is_block_device(path)) {
+	if (is_block_device(path) == 1) {
 		struct btrfs_super_block *disk_super;
 		char buf[BTRFS_SUPER_INFO_SIZE];
 		u64 devid;
@@ -2302,9 +2425,8 @@ static int group_profile_devs_min(u64 flag)
 }
 
 int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
-	u64 dev_cnt, int mixed, char *estr)
+	u64 dev_cnt, int mixed)
 {
-	size_t sz = 100;
 	u64 allowed = 0;
 
 	switch (dev_cnt) {
@@ -2323,21 +2445,21 @@ int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
 
 	if (dev_cnt > 1 &&
 	    ((metadata_profile | data_profile) & BTRFS_BLOCK_GROUP_DUP)) {
-		snprintf(estr, sz,
-			"DUP is not allowed when FS has multiple devices\n");
+		fprintf(stderr,
+		    "ERROR: DUP is not allowed when FS has multiple devices\n");
 		return 1;
 	}
 	if (metadata_profile & ~allowed) {
-		snprintf(estr, sz,
-			"unable to create FS with metadata profile %s "
+		fprintf(stderr,
+			"ERROR: unable to create FS with metadata profile %s "
 			"(have %llu devices but %d devices are required)\n",
 			btrfs_group_profile_str(metadata_profile), dev_cnt,
 			group_profile_devs_min(metadata_profile));
 		return 1;
 	}
 	if (data_profile & ~allowed) {
-		snprintf(estr, sz,
-			"unable to create FS with data profile %s "
+		fprintf(stderr,
+			"ERROR: unable to create FS with data profile %s "
 			"(have %llu devices but %d devices are required)\n",
 			btrfs_group_profile_str(data_profile), dev_cnt,
 			group_profile_devs_min(data_profile));
@@ -2345,65 +2467,83 @@ int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
 	}
 
 	if (!mixed && (data_profile & BTRFS_BLOCK_GROUP_DUP)) {
-		snprintf(estr, sz,
-			"dup for data is allowed only in mixed mode");
+		fprintf(stderr,
+			"ERROR: DUP for data is allowed only in mixed mode\n");
 		return 1;
 	}
 	return 0;
 }
 
-/* Check if disk is suitable for btrfs
+int group_profile_max_safe_loss(u64 flags)
+{
+	switch (flags & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
+	case 0: /* single */
+	case BTRFS_BLOCK_GROUP_DUP:
+	case BTRFS_BLOCK_GROUP_RAID0:
+		return 0;
+	case BTRFS_BLOCK_GROUP_RAID1:
+	case BTRFS_BLOCK_GROUP_RAID5:
+	case BTRFS_BLOCK_GROUP_RAID10:
+		return 1;
+	case BTRFS_BLOCK_GROUP_RAID6:
+		return 2;
+	default:
+		return -1;
+	}
+}
+
+/*
+ * Check if a device is suitable for btrfs
  * returns:
- *  1: something is wrong, estr provides the error
+ *  1: something is wrong, an error is printed
  *  0: all is fine
  */
-int test_dev_for_mkfs(char *file, int force_overwrite, char *estr)
+int test_dev_for_mkfs(char *file, int force_overwrite)
 {
 	int ret, fd;
-	size_t sz = 100;
 	struct stat st;
 
 	ret = is_swap_device(file);
 	if (ret < 0) {
-		snprintf(estr, sz, "error checking %s status: %s\n", file,
+		fprintf(stderr, "ERROR: checking status of %s: %s\n", file,
 			strerror(-ret));
 		return 1;
 	}
 	if (ret == 1) {
-		snprintf(estr, sz, "%s is a swap device\n", file);
+		fprintf(stderr, "ERROR: %s is a swap device\n", file);
 		return 1;
 	}
 	if (!force_overwrite) {
 		if (check_overwrite(file)) {
-			snprintf(estr, sz, "Use the -f option to force overwrite.\n");
+			fprintf(stderr, "Use the -f option to force overwrite.\n");
 			return 1;
 		}
 	}
 	ret = check_mounted(file);
 	if (ret < 0) {
-		snprintf(estr, sz, "error checking %s mount status\n",
-			file);
+		fprintf(stderr, "ERROR: checking mount status of %s: %s\n",
+			file, strerror(-ret));
 		return 1;
 	}
 	if (ret == 1) {
-		snprintf(estr, sz, "%s is mounted\n", file);
+		fprintf(stderr, "ERROR: %s is mounted\n", file);
 		return 1;
 	}
 	/* check if the device is busy */
 	fd = open(file, O_RDWR|O_EXCL);
 	if (fd < 0) {
-		snprintf(estr, sz, "unable to open %s: %s\n", file,
+		fprintf(stderr, "ERROR: unable to open %s: %s\n", file,
 			strerror(errno));
 		return 1;
 	}
 	if (fstat(fd, &st)) {
-		snprintf(estr, sz, "unable to stat %s: %s\n", file,
+		fprintf(stderr, "ERROR: unable to stat %s: %s\n", file,
 			strerror(errno));
 		close(fd);
 		return 1;
 	}
 	if (!S_ISBLK(st.st_mode)) {
-		fprintf(stderr, "'%s' is not a block device\n", file);
+		fprintf(stderr, "ERROR: %s is not a block device\n", file);
 		close(fd);
 		return 1;
 	}
@@ -2411,7 +2551,7 @@ int test_dev_for_mkfs(char *file, int force_overwrite, char *estr)
 	return 0;
 }
 
-int btrfs_scan_lblkid()
+int btrfs_scan_lblkid(void)
 {
 	int fd = -1;
 	int ret;
@@ -2594,7 +2734,7 @@ int find_mount_root(const char *path, char **mount_root)
 	return ret;
 }
 
-int test_minimum_size(const char *file, u32 leafsize)
+int test_minimum_size(const char *file, u32 nodesize)
 {
 	int fd;
 	struct stat statbuf;
@@ -2606,7 +2746,7 @@ int test_minimum_size(const char *file, u32 leafsize)
 		close(fd);
 		return -errno;
 	}
-	if (btrfs_device_size(fd, &statbuf) < btrfs_min_dev_size(leafsize)) {
+	if (btrfs_device_size(fd, &statbuf) < btrfs_min_dev_size(nodesize)) {
 		close(fd);
 		return 1;
 	}
@@ -2789,23 +2929,150 @@ int btrfs_tree_search2_ioctl_supported(int fd)
 	return v2_supported;
 }
 
-int btrfs_check_node_or_leaf_size(u32 size, u32 sectorsize)
+int btrfs_check_nodesize(u32 nodesize, u32 sectorsize, u64 features)
 {
-	if (size < sectorsize) {
+	if (nodesize < sectorsize) {
 		fprintf(stderr,
-			"ERROR: Illegal nodesize (or leafsize) %u (smaller than %u)\n",
-			size, sectorsize);
+			"ERROR: Illegal nodesize %u (smaller than %u)\n",
+			nodesize, sectorsize);
 		return -1;
-	} else if (size > BTRFS_MAX_METADATA_BLOCKSIZE) {
+	} else if (nodesize > BTRFS_MAX_METADATA_BLOCKSIZE) {
 		fprintf(stderr,
-			"ERROR: Illegal nodesize (or leafsize) %u (larger than %u)\n",
-			size, BTRFS_MAX_METADATA_BLOCKSIZE);
+			"ERROR: Illegal nodesize %u (larger than %u)\n",
+			nodesize, BTRFS_MAX_METADATA_BLOCKSIZE);
 		return -1;
-	} else if (size & (sectorsize - 1)) {
+	} else if (nodesize & (sectorsize - 1)) {
 		fprintf(stderr,
-			"ERROR: Illegal nodesize (or leafsize) %u (not aligned to %u)\n",
-			size, sectorsize);
+			"ERROR: Illegal nodesize %u (not aligned to %u)\n",
+			nodesize, sectorsize);
+		return -1;
+	} else if (features & BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS &&
+		   nodesize != sectorsize) {
+		fprintf(stderr,
+			"ERROR: Illegal nodesize %u (not equal to %u for mixed block group)\n",
+			nodesize, sectorsize);
 		return -1;
 	}
 	return 0;
+}
+
+/*
+ * Copy a path argument from SRC to DEST and check the SRC length if it's at
+ * most PATH_MAX and fits into DEST. DESTLEN is supposed to be exact size of
+ * the buffer.
+ * The destination buffer is zero terminated.
+ * Return < 0 for error, 0 otherwise.
+ */
+int arg_copy_path(char *dest, const char *src, int destlen)
+{
+	size_t len = strlen(src);
+
+	if (len >= PATH_MAX || len >= destlen)
+		return -ENAMETOOLONG;
+
+	__strncpy__null(dest, src, destlen);
+
+	return 0;
+}
+
+unsigned int get_unit_mode_from_arg(int *argc, char *argv[], int df_mode)
+{
+	unsigned int unit_mode = UNITS_DEFAULT;
+	int arg_i;
+	int arg_end;
+
+	for (arg_i = 0; arg_i < *argc; arg_i++) {
+		if (!strcmp(argv[arg_i], "--raw")) {
+			unit_mode = UNITS_RAW;
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "--human-readable")) {
+			unit_mode = UNITS_HUMAN_BINARY;
+			argv[arg_i] = NULL;
+			continue;
+		}
+
+		if (!strcmp(argv[arg_i], "--iec")) {
+			units_set_mode(&unit_mode, UNITS_BINARY);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "--si")) {
+			units_set_mode(&unit_mode, UNITS_DECIMAL);
+			argv[arg_i] = NULL;
+			continue;
+		}
+
+		if (!strcmp(argv[arg_i], "--kbytes")) {
+			units_set_base(&unit_mode, UNITS_KBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "--mbytes")) {
+			units_set_base(&unit_mode, UNITS_MBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "--gbytes")) {
+			units_set_base(&unit_mode, UNITS_GBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "--tbytes")) {
+			units_set_base(&unit_mode, UNITS_TBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+
+		if (!df_mode)
+			continue;
+
+		if (!strcmp(argv[arg_i], "-b")) {
+			unit_mode = UNITS_RAW;
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-h")) {
+			unit_mode = UNITS_HUMAN_BINARY;
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-H")) {
+			unit_mode = UNITS_HUMAN_DECIMAL;
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-k")) {
+			units_set_base(&unit_mode, UNITS_KBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-m")) {
+			units_set_base(&unit_mode, UNITS_MBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-g")) {
+			units_set_base(&unit_mode, UNITS_GBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+		if (!strcmp(argv[arg_i], "-t")) {
+			units_set_base(&unit_mode, UNITS_TBYTES);
+			argv[arg_i] = NULL;
+			continue;
+		}
+	}
+
+	for (arg_i = 0, arg_end = 0; arg_i < *argc; arg_i++) {
+		if (!argv[arg_i])
+			continue;
+		argv[arg_end] = argv[arg_i];
+		arg_end++;
+	}
+
+	*argc = arg_end;
+
+	return unit_mode;
 }

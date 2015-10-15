@@ -19,6 +19,9 @@
 #ifndef __BTRFS_DISK_IO_H__
 #define __BTRFS_DISK_IO_H__
 
+#include "kerncompat.h"
+#include "ctree.h"
+
 #define BTRFS_SUPER_INFO_OFFSET (64 * 1024)
 #define BTRFS_SUPER_INFO_SIZE 4096
 
@@ -49,6 +52,8 @@ enum btrfs_open_ctree_flags {
 	 * tree bits.
 	 * Like split PARTIAL into SKIP_CSUM/SKIP_EXTENT
 	 */
+
+	OPEN_CTREE_IGNORE_FSID_MISMATCH	= (1 << 10)
 };
 
 static inline u64 btrfs_sb_offset(int mirror)
@@ -64,6 +69,8 @@ struct btrfs_device;
 int read_whole_eb(struct btrfs_fs_info *info, struct extent_buffer *eb, int mirror);
 struct extent_buffer *read_tree_block(struct btrfs_root *root, u64 bytenr,
 				      u32 blocksize, u64 parent_transid);
+int read_extent_data(struct btrfs_root *root, char *data, u64 logical,
+		     u64 *len, int mirror);
 void readahead_tree_block(struct btrfs_root *root, u64 bytenr, u32 blocksize,
 			  u64 parent_transid);
 struct extent_buffer *btrfs_find_create_tree_block(struct btrfs_root *root,
@@ -124,6 +131,9 @@ int csum_tree_block_size(struct extent_buffer *buf, u16 csum_sectorsize,
 			 int verify);
 int verify_tree_block_csum_silent(struct extent_buffer *buf, u16 csum_size);
 int btrfs_read_buffer(struct extent_buffer *buf, u64 parent_transid);
+int write_tree_block(struct btrfs_trans_handle *trans,
+		     struct btrfs_root *root,
+		     struct extent_buffer *eb);
 int write_and_map_eb(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		     struct extent_buffer *eb);
 

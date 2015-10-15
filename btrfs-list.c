@@ -18,7 +18,6 @@
 
 #include <sys/ioctl.h>
 #include <sys/mount.h>
-#include "ioctl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -30,6 +29,7 @@
 #include "ctree.h"
 #include "transaction.h"
 #include "utils.h"
+#include "ioctl.h"
 #include <uuid/uuid.h>
 #include "btrfs-list.h"
 #include "rbtree-utils.h"
@@ -254,11 +254,15 @@ static int btrfs_list_setup_comparer(struct btrfs_list_comparer_set **comp_set,
 	BUG_ON(set->ncomps > set->total);
 
 	if (set->ncomps == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_LIST_NCOMPS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_list_comparer);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 
@@ -1232,11 +1236,15 @@ int btrfs_list_setup_filter(struct btrfs_list_filter_set **filter_set,
 	BUG_ON(set->nfilters > set->total);
 
 	if (set->nfilters == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_LIST_NFILTERS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_list_filter);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 

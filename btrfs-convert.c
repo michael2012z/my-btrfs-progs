@@ -24,7 +24,6 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/acl.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
@@ -43,7 +42,7 @@
 #include <ext2fs/ext2_ext_attr.h>
 
 #define INO_OFFSET (BTRFS_FIRST_FREE_OBJECTID - EXT2_ROOT_INO)
-#define EXT2_IMAGE_SUBVOL_OBJECTID BTRFS_FIRST_FREE_OBJECTID
+#define CONV_IMAGE_SUBVOL_OBJECTID BTRFS_FIRST_FREE_OBJECTID
 
 struct task_ctx {
 	uint32_t max_copy_inodes;
@@ -72,10 +71,8 @@ static void *print_copied_inodes(void *p)
 
 static int after_copied_inodes(void *p)
 {
-	struct task_ctx *priv = p;
-
 	printf("\n");
-	task_period_stop(priv->info);
+	fflush(stdout);
 
 	return 0;
 }
@@ -208,7 +205,8 @@ static int cache_free_extents(struct btrfs_root *root, ext2_filsys ext2_fs)
 }
 
 static int custom_alloc_extent(struct btrfs_root *root, u64 num_bytes,
-			       u64 hint_byte, struct btrfs_key *ins)
+			       u64 hint_byte, struct btrfs_key *ins,
+			       int metadata)
 {
 	u64 start;
 	u64 end;
@@ -247,6 +245,14 @@ static int custom_alloc_extent(struct btrfs_root *root, u64 num_bytes,
 			continue;
 		}
 
+		if (metadata) {
+			BUG_ON(num_bytes != root->nodesize);
+			if (check_crossing_stripes(start, num_bytes)) {
+				last = round_down(start + num_bytes,
+						  BTRFS_STRIPE_LEN);
+				continue;
+			}
+		}
 		clear_extent_dirty(&root->fs_info->free_space_cache,
 				   start, start + num_bytes - 1, 0);
 
@@ -287,6 +293,35 @@ static struct btrfs_extent_ops extent_ops = {
 	.free_extent = custom_free_extent,
 };
 
+static int convert_insert_dirent(struct btrfs_trans_handle *trans,
+				 struct btrfs_root *root,
+				 const char *name, size_t name_len,
+				 u64 dir, u64 objectid,
+				 u8 file_type, u64 index_cnt,
+				 struct btrfs_inode_item *inode)
+{
+	int ret;
+	u64 inode_size;
+	struct btrfs_key location = {
+		.objectid = objectid,
+		.offset = 0,
+		.type = BTRFS_INODE_ITEM_KEY,
+	};
+
+	ret = btrfs_insert_dir_item(trans, root, name, name_len,
+				    dir, &location, file_type, index_cnt);
+	if (ret)
+		return ret;
+	ret = btrfs_insert_inode_ref(trans, root, name, name_len,
+				     objectid, dir, index_cnt);
+	if (ret)
+		return ret;
+	inode_size = btrfs_stack_inode_size(inode) + name_len * 2;
+	btrfs_set_stack_inode_size(inode, inode_size);
+
+	return 0;
+}
+
 struct dir_iterate_data {
 	struct btrfs_trans_handle *trans;
 	struct btrfs_root *root;
@@ -316,9 +351,7 @@ static int dir_iterate_proc(ext2_ino_t dir, int entry,
 	int ret;
 	int file_type;
 	u64 objectid;
-        u64 inode_size;
 	char dotdot[] = "..";
-	struct btrfs_key location;
 	struct dir_iterate_data *idata = (struct dir_iterate_data *)priv_data;
 	int name_len;
 
@@ -335,33 +368,20 @@ static int dir_iterate_proc(ext2_ino_t dir, int entry,
 	if (dirent->inode < EXT2_GOOD_OLD_FIRST_INO)
 		return 0;
 
-	location.objectid = objectid;
-	location.offset = 0;
-	btrfs_set_key_type(&location, BTRFS_INODE_ITEM_KEY);
-
 	file_type = dirent->name_len >> 8;
 	BUG_ON(file_type > EXT2_FT_SYMLINK);
-	ret = btrfs_insert_dir_item(idata->trans, idata->root,
-				    dirent->name, name_len,
-				    idata->objectid, &location,
+
+	ret = convert_insert_dirent(idata->trans, idata->root, dirent->name,
+				    name_len, idata->objectid, objectid,
 				    filetype_conversion_table[file_type],
-				    idata->index_cnt);
-	if (ret)
-		goto fail;
-	ret = btrfs_insert_inode_ref(idata->trans, idata->root,
-				     dirent->name, name_len,
-				     objectid, idata->objectid,
-				     idata->index_cnt);
-	if (ret)
-		goto fail;
+				    idata->index_cnt, idata->inode);
+	if (ret < 0) {
+		idata->errcode = ret;
+		return BLOCK_ABORT;
+	}
+
 	idata->index_cnt++;
-	inode_size = btrfs_stack_inode_size(idata->inode) +
-		     name_len * 2;
-	btrfs_set_stack_inode_size(idata->inode, inode_size);
 	return 0;
-fail:
-	idata->errcode = ret;
-	return BLOCK_ABORT;
 }
 
 static int create_dir_entries(struct btrfs_trans_handle *trans,
@@ -441,25 +461,6 @@ static int csum_disk_extent(struct btrfs_trans_handle *trans,
 	return ret;
 }
 
-static int record_file_blocks(struct btrfs_trans_handle *trans,
-			      struct btrfs_root *root, u64 objectid,
-			      struct btrfs_inode_item *inode,
-			      u64 file_block, u64 disk_block,
-			      u64 num_blocks, int checksum)
-{
-	int ret;
-	u64 file_pos = file_block * root->sectorsize;
-	u64 disk_bytenr = disk_block * root->sectorsize;
-	u64 num_bytes = num_blocks * root->sectorsize;
-	ret = btrfs_record_file_extent(trans, root, objectid, inode, file_pos,
-					disk_bytenr, num_bytes);
-
-	if (ret || !checksum || disk_bytenr == 0)
-		return ret;
-
-	return csum_disk_extent(trans, root, disk_bytenr, num_bytes);
-}
-
 struct blk_iterate_data {
 	struct btrfs_trans_handle *trans;
 	struct btrfs_root *root;
@@ -473,15 +474,50 @@ struct blk_iterate_data {
 	int errcode;
 };
 
-static int block_iterate_proc(ext2_filsys ext2_fs,
-			      u64 disk_block, u64 file_block,
-		              struct blk_iterate_data *idata)
+static void init_blk_iterate_data(struct blk_iterate_data *data,
+				  struct btrfs_trans_handle *trans,
+				  struct btrfs_root *root,
+				  struct btrfs_inode_item *inode,
+				  u64 objectid, int checksum)
+{
+	data->trans		= trans;
+	data->root		= root;
+	data->inode		= inode;
+	data->objectid		= objectid;
+	data->first_block	= 0;
+	data->disk_block	= 0;
+	data->num_blocks	= 0;
+	data->boundary		= (u64)-1;
+	data->checksum		= checksum;
+	data->errcode		= 0;
+}
+
+static int record_file_blocks(struct blk_iterate_data *data,
+			      u64 file_block, u64 disk_block, u64 num_blocks)
 {
 	int ret;
+	struct btrfs_root *root = data->root;
+	u64 file_pos = file_block * root->sectorsize;
+	u64 disk_bytenr = disk_block * root->sectorsize;
+	u64 num_bytes = num_blocks * root->sectorsize;
+	ret = btrfs_record_file_extent(data->trans, data->root,
+				       data->objectid, data->inode, file_pos,
+				       disk_bytenr, num_bytes);
+
+	if (ret || !data->checksum || disk_bytenr == 0)
+		return ret;
+
+	return csum_disk_extent(data->trans, data->root, disk_bytenr,
+				num_bytes);
+}
+
+static int block_iterate_proc(u64 disk_block, u64 file_block,
+		              struct blk_iterate_data *idata)
+{
+	int ret = 0;
 	int sb_region;
 	int do_barrier;
 	struct btrfs_root *root = idata->root;
-	struct btrfs_trans_handle *trans = idata->trans;
 	struct btrfs_block_group_cache *cache;
 	u64 bytenr = disk_block * root->sectorsize;
 
@@ -491,20 +527,17 @@ static int block_iterate_proc(ext2_filsys ext2_fs,
 	    (file_block > idata->first_block + idata->num_blocks) ||
 	    (disk_block != idata->disk_block + idata->num_blocks)) {
 		if (idata->num_blocks > 0) {
-			ret = record_file_blocks(trans, root, idata->objectid,
-					idata->inode, idata->first_block,
-					idata->disk_block, idata->num_blocks,
-					idata->checksum);
+			ret = record_file_blocks(idata, idata->first_block,
+						 idata->disk_block,
+						 idata->num_blocks);
 			if (ret)
 				goto fail;
 			idata->first_block += idata->num_blocks;
 			idata->num_blocks = 0;
 		}
 		if (file_block > idata->first_block) {
-			ret = record_file_blocks(trans, root, idata->objectid,
-					idata->inode, idata->first_block,
-					0, file_block - idata->first_block,
-					idata->checksum);
+			ret = record_file_blocks(idata, idata->first_block,
+					0, file_block - idata->first_block);
 			if (ret)
 				goto fail;
 		}
@@ -523,19 +556,23 @@ static int block_iterate_proc(ext2_filsys ext2_fs,
 		idata->boundary = bytenr / root->sectorsize;
 	}
 	idata->num_blocks++;
-	return 0;
 fail:
-	idata->errcode = ret;
-	return BLOCK_ABORT;
+	return ret;
 }
 
 static int __block_iterate_proc(ext2_filsys fs, blk_t *blocknr,
 			        e2_blkcnt_t blockcnt, blk_t ref_block,
 			        int ref_offset, void *priv_data)
 {
+	int ret;
 	struct blk_iterate_data *idata;
 	idata = (struct blk_iterate_data *)priv_data;
-	return block_iterate_proc(fs, *blocknr, blockcnt, idata);
+	ret = block_iterate_proc(*blocknr, blockcnt, idata);
+	if (ret) {
+		idata->errcode = ret;
+		return BLOCK_ABORT;
+	}
+	return 0;
 }
 
 /*
@@ -553,18 +590,11 @@ static int create_file_extents(struct btrfs_trans_handle *trans,
 	u32 last_block;
 	u32 sectorsize = root->sectorsize;
 	u64 inode_size = btrfs_stack_inode_size(btrfs_inode);
-	struct blk_iterate_data data = {
-		.trans		= trans,
-		.root		= root,
-		.inode		= btrfs_inode,
-		.objectid	= objectid,
-		.first_block	= 0,
-		.disk_block	= 0,
-		.num_blocks	= 0,
-		.boundary	= (u64)-1,
-		.checksum	= datacsum,
-		.errcode	= 0,
-	};
+	struct blk_iterate_data data;
+
+	init_blk_iterate_data(&data, trans, root, btrfs_inode, objectid,
+			      datacsum);
+
 	err = ext2fs_block_iterate2(ext2_fs, ext2_ino, BLOCK_FLAG_DATA_ONLY,
 				    NULL, __block_iterate_proc, &data);
 	if (err)
@@ -593,18 +623,16 @@ static int create_file_extents(struct btrfs_trans_handle *trans,
 		nbytes = btrfs_stack_inode_nbytes(btrfs_inode) + num_bytes;
 		btrfs_set_stack_inode_nbytes(btrfs_inode, nbytes);
 	} else if (data.num_blocks > 0) {
-		ret = record_file_blocks(trans, root, objectid, btrfs_inode,
-					 data.first_block, data.disk_block,
-					 data.num_blocks, data.checksum);
+		ret = record_file_blocks(&data, data.first_block,
+					 data.disk_block, data.num_blocks);
 		if (ret)
 			goto fail;
 	}
 	data.first_block += data.num_blocks;
 	last_block = (inode_size + sectorsize - 1) / sectorsize;
 	if (last_block > data.first_block) {
-		ret = record_file_blocks(trans, root, objectid, btrfs_inode,
-					 data.first_block, 0, last_block -
-					 data.first_block, data.checksum);
+		ret = record_file_blocks(&data, data.first_block, 0,
+					 last_block - data.first_block);
 	}
 fail:
 	free(buffer);
@@ -691,6 +719,20 @@ static int ext2_xattr_check_entry(struct ext2_ext_attr_entry *entry,
 }
 
 #define EXT2_ACL_VERSION	0x0001
+
+/* 23.2.5 acl_tag_t values */
+
+#define ACL_UNDEFINED_TAG       (0x00)
+#define ACL_USER_OBJ            (0x01)
+#define ACL_USER                (0x02)
+#define ACL_GROUP_OBJ           (0x04)
+#define ACL_GROUP               (0x08)
+#define ACL_MASK                (0x10)
+#define ACL_OTHER               (0x20)
+
+/* 23.2.7 ACL qualifier constants */
+
+#define ACL_UNDEFINED_ID        ((id_t)-1)
 
 typedef struct {
 	__le16		e_tag;
@@ -974,6 +1016,8 @@ static int copy_inode_item(struct btrfs_inode_item *dst,
 			   struct ext2_inode *src, u32 blocksize)
 {
 	btrfs_set_stack_inode_generation(dst, 1);
+	btrfs_set_stack_inode_sequence(dst, 0);
+	btrfs_set_stack_inode_transid(dst, 1);
 	btrfs_set_stack_inode_size(dst, src->i_size);
 	btrfs_set_stack_inode_nbytes(dst, 0);
 	btrfs_set_stack_inode_block_group(dst, 0);
@@ -1010,6 +1054,8 @@ static int copy_inode_item(struct btrfs_inode_item *dst,
 				new_decode_dev(src->i_block[1]));
 		}
 	}
+	memset(&dst->reserved, 0, sizeof(dst->reserved));
+
 	return 0;
 }
 
@@ -1024,7 +1070,6 @@ static int copy_single_inode(struct btrfs_trans_handle *trans,
 			     int datacsum, int packing, int noxattr)
 {
 	int ret;
-	struct btrfs_key inode_key;
 	struct btrfs_inode_item btrfs_inode;
 
 	if (ext2_inode->i_links_count == 0)
@@ -1063,11 +1108,7 @@ static int copy_single_inode(struct btrfs_trans_handle *trans,
 		if (ret)
 			return ret;
 	}
-	inode_key.objectid = objectid;
-	inode_key.offset = 0;
-	btrfs_set_key_type(&inode_key, BTRFS_INODE_ITEM_KEY);
-	ret = btrfs_insert_inode(trans, root, objectid, &btrfs_inode);
-	return ret;
+	return btrfs_insert_inode(trans, root, objectid, &btrfs_inode);
 }
 
 static int copy_disk_extent(struct btrfs_root *root, u64 dst_bytenr,
@@ -1145,6 +1186,7 @@ static int copy_inodes(struct btrfs_root *root, ext2_filsys ext2_fs,
 	}
 	ret = btrfs_commit_transaction(trans, root);
 	BUG_ON(ret);
+	ext2fs_close_inode_scan(ext2_scan);
 
 	return ret;
 }
@@ -1161,45 +1203,34 @@ static int create_image_file_range(struct btrfs_trans_handle *trans,
 				   struct btrfs_root *root, u64 objectid,
 				   struct btrfs_inode_item *inode,
 				   u64 start_byte, u64 end_byte,
-				   ext2_filsys ext2_fs)
+				   ext2_filsys ext2_fs, int datacsum)
 {
 	u32 blocksize = ext2_fs->blocksize;
 	u32 block = start_byte / blocksize;
 	u32 last_block = (end_byte + blocksize - 1) / blocksize;
 	int ret = 0;
-	struct blk_iterate_data data = {
-		.trans		= trans,
-		.root		= root,
-		.inode		= inode,
-		.objectid	= objectid,
-		.first_block	= block,
-		.disk_block	= 0,
-		.num_blocks	= 0,
-		.boundary	= (u64)-1,
-		.checksum 	= 0,
-		.errcode	= 0,
-	};
+	struct blk_iterate_data data;
+
+	init_blk_iterate_data(&data, trans, root, inode, objectid, datacsum);
+	data.first_block = block;
+
 	for (; start_byte < end_byte; block++, start_byte += blocksize) {
 		if (!ext2fs_fast_test_block_bitmap(ext2_fs->block_map, block))
 			continue;
-		ret = block_iterate_proc(NULL, block, block, &data);
-		if (ret & BLOCK_ABORT) {
-			ret = data.errcode;
+		ret = block_iterate_proc(block, block, &data);
+		if (ret < 0)
 			goto fail;
-		}
 	}
 	if (data.num_blocks > 0) {
-		ret = record_file_blocks(trans, root, objectid, inode,
-					 data.first_block, data.disk_block,
-					 data.num_blocks, 0);
+		ret = record_file_blocks(&data, data.first_block,
+					 data.disk_block, data.num_blocks);
 		if (ret)
 			goto fail;
 		data.first_block += data.num_blocks;
 	}
 	if (last_block > data.first_block) {
-		ret = record_file_blocks(trans, root, objectid, inode,
-					 data.first_block, 0, last_block -
-					 data.first_block, 0);
+		ret = record_file_blocks(&data, data.first_block, 0,
+					 last_block - data.first_block);
 		if (ret)
 			goto fail;
 	}
@@ -1210,7 +1241,7 @@ fail:
  * Create the ext2fs image file.
  */
 static int create_ext2_image(struct btrfs_root *root, ext2_filsys ext2_fs,
-			     const char *name)
+			     const char *name, int datacsum)
 {
 	int ret;
 	struct btrfs_key key;
@@ -1231,11 +1262,14 @@ static int create_ext2_image(struct btrfs_root *root, ext2_filsys ext2_fs,
 	u64 last_byte;
 	u64 first_free;
 	u64 total_bytes;
+	u64 flags = BTRFS_INODE_READONLY;
 	u32 sectorsize = root->sectorsize;
 
 	total_bytes = btrfs_super_total_bytes(fs_info->super_copy);
 	first_free =  BTRFS_SUPER_INFO_OFFSET + sectorsize * 2 - 1;
 	first_free &= ~((u64)sectorsize - 1);
+	if (!datacsum)
+		flags |= BTRFS_INODE_NODATASUM;
 
 	memset(&btrfs_inode, 0, sizeof(btrfs_inode));
 	btrfs_set_stack_inode_generation(&btrfs_inode, 1);
@@ -1243,8 +1277,7 @@ static int create_ext2_image(struct btrfs_root *root, ext2_filsys ext2_fs,
 	btrfs_set_stack_inode_nlink(&btrfs_inode, 1);
 	btrfs_set_stack_inode_nbytes(&btrfs_inode, 0);
 	btrfs_set_stack_inode_mode(&btrfs_inode, S_IFREG | 0400);
-	btrfs_set_stack_inode_flags(&btrfs_inode, BTRFS_INODE_NODATASUM |
-				    BTRFS_INODE_READONLY);
+	btrfs_set_stack_inode_flags(&btrfs_inode,  flags);
 	btrfs_init_path(&path);
 	trans = btrfs_start_transaction(root, 1);
 	BUG_ON(!trans);
@@ -1259,7 +1292,7 @@ static int create_ext2_image(struct btrfs_root *root, ext2_filsys ext2_fs,
 	 * special, we can't rely on relocate_extents_range to relocate it.
 	 */
 	for (last_byte = 0; last_byte < first_free; last_byte += sectorsize) {
-		ret = custom_alloc_extent(root, sectorsize, 0, &key);
+		ret = custom_alloc_extent(root, sectorsize, 0, &key, 0);
 		if (ret)
 			goto fail;
 		ret = copy_disk_extent(root, key.objectid, last_byte,
@@ -1271,6 +1304,12 @@ static int create_ext2_image(struct btrfs_root *root, ext2_filsys ext2_fs,
 					       key.objectid, sectorsize);
 		if (ret)
 			goto fail;
+		if (datacsum) {
+			ret = csum_disk_extent(trans, root, key.objectid,
+					       sectorsize);
+			if (ret)
+				goto fail;
+		}
 	}
 
 	while(1) {
@@ -1323,7 +1362,8 @@ next:
 		if (bytenr > last_byte) {
 			ret = create_image_file_range(trans, root, objectid,
 						      &btrfs_inode, last_byte,
-						      bytenr, ext2_fs);
+						      bytenr, ext2_fs,
+						      datacsum);
 			if (ret)
 				goto fail;
 		}
@@ -1346,7 +1386,8 @@ next:
 	if (total_bytes > last_byte) {
 		ret = create_image_file_range(trans, root, objectid,
 					      &btrfs_inode, last_byte,
-					      total_bytes, ext2_fs);
+					      total_bytes, ext2_fs,
+					      datacsum);
 		if (ret)
 			goto fail;
 	}
@@ -1360,7 +1401,7 @@ next:
 	btrfs_set_key_type(&location, BTRFS_INODE_ITEM_KEY);
 	ret = btrfs_insert_dir_item(trans, root, name, strlen(name),
 				    btrfs_root_dirid(&root->root_item),
-				    &location, EXT2_FT_REG_FILE, objectid);
+				    &location, BTRFS_FT_REG_FILE, objectid);
 	if (ret)
 		goto fail;
 	ret = btrfs_insert_inode_ref(trans, root, name, strlen(name),
@@ -1686,7 +1727,7 @@ static int init_btrfs(struct btrfs_root *root)
 			     BTRFS_FIRST_FREE_OBJECTID);
 
 	/* subvol for ext2 image file */
-	ret = create_subvol(trans, root, EXT2_IMAGE_SUBVOL_OBJECTID);
+	ret = create_subvol(trans, root, CONV_IMAGE_SUBVOL_OBJECTID);
 	BUG_ON(ret);
 	/* subvol for data relocation */
 	ret = create_subvol(trans, root, BTRFS_DATA_RELOC_TREE_OBJECTID);
@@ -1789,20 +1830,20 @@ static int prepare_system_chunk_sb(struct btrfs_super_block *super)
 	return 0;
 }
 
-static int prepare_system_chunk(int fd, u64 sb_bytenr, u32 sectorsize)
+static int prepare_system_chunk(int fd, u64 sb_bytenr)
 {
 	int ret;
 	struct extent_buffer *buf;
 	struct btrfs_super_block *super;
 
-	BUG_ON(sectorsize < sizeof(*super));
-	buf = malloc(sizeof(*buf) + sectorsize);
+	BUG_ON(BTRFS_SUPER_INFO_SIZE < sizeof(*super));
+	buf = malloc(sizeof(*buf) + BTRFS_SUPER_INFO_SIZE);
 	if (!buf)
 		return -ENOMEM;
 
-	buf->len = sectorsize;
-	ret = pread(fd, buf->data, sectorsize, sb_bytenr);
-	if (ret != sectorsize)
+	buf->len = BTRFS_SUPER_INFO_SIZE;
+	ret = pread(fd, buf->data, BTRFS_SUPER_INFO_SIZE, sb_bytenr);
+	if (ret != BTRFS_SUPER_INFO_SIZE)
 		goto fail;
 
 	super = (struct btrfs_super_block *)buf->data;
@@ -1814,8 +1855,8 @@ static int prepare_system_chunk(int fd, u64 sb_bytenr, u32 sectorsize)
 		goto fail;
 
 	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, sectorsize, sb_bytenr);
-	if (ret != sectorsize)
+	ret = pwrite(fd, buf->data, BTRFS_SUPER_INFO_SIZE, sb_bytenr);
+	if (ret != BTRFS_SUPER_INFO_SIZE)
 		goto fail;
 
 	ret = 0;
@@ -1897,18 +1938,9 @@ static int relocate_one_reference(struct btrfs_trans_handle *trans,
 	btrfs_set_stack_inode_nbytes(&inode, nbytes);
 	datacsum = !(btrfs_stack_inode_flags(&inode) & BTRFS_INODE_NODATASUM);
 
-	data = (struct blk_iterate_data) {
-		.trans		= trans,
-		.root		= root,
-		.inode		= &inode,
-		.objectid	= extent_key->objectid,
-		.first_block	= extent_key->offset / sectorsize,
-		.disk_block	= 0,
-		.num_blocks	= 0,
-		.boundary	= (u64)-1,
-		.checksum	= datacsum,
-		.errcode	= 0,
-	};
+	init_blk_iterate_data(&data, trans, root, &inode, extent_key->objectid,
+			      datacsum);
+	data.first_block = extent_key->offset;
 
 	cur_offset = extent_key->offset;
 	while (num_bytes > 0) {
@@ -1918,7 +1950,7 @@ static int relocate_one_reference(struct btrfs_trans_handle *trans,
 			ret = get_state_private(reloc_tree, bytenr, &new_pos);
 			BUG_ON(ret);
 		} else {
-			ret = custom_alloc_extent(root, sectorsize, 0, &key);
+			ret = custom_alloc_extent(root, sectorsize, 0, &key, 0);
 			if (ret)
 				goto fail;
 			new_pos = key.objectid;
@@ -1938,12 +1970,10 @@ static int relocate_one_reference(struct btrfs_trans_handle *trans,
 			BUG_ON(ret);
 		}
 
-		ret = block_iterate_proc(NULL, new_pos / sectorsize,
+		ret = block_iterate_proc(new_pos / sectorsize,
 					 cur_offset / sectorsize, &data);
-		if (ret & BLOCK_ABORT) {
-			ret = data.errcode;
+		if (ret < 0)
 			goto fail;
-		}
 
 		cur_offset += sectorsize;
 		bytenr += sectorsize;
@@ -1951,10 +1981,8 @@ static int relocate_one_reference(struct btrfs_trans_handle *trans,
 	}
 
 	if (data.num_blocks > 0) {
-		ret = record_file_blocks(trans, root,
-					 extent_key->objectid, &inode,
-					 data.first_block, data.disk_block,
-					 data.num_blocks, datacsum);
+		ret = record_file_blocks(&data, data.first_block,
+					 data.disk_block, data.num_blocks);
 		if (ret)
 			goto fail;
 	}
@@ -1978,7 +2006,7 @@ fail:
 }
 
 static int relocate_extents_range(struct btrfs_root *fs_root,
-				  struct btrfs_root *ext2_root,
+				  struct btrfs_root *image_root,
 				  u64 start_byte, u64 end_byte)
 {
 	struct btrfs_fs_info *info = fs_root->fs_info;
@@ -2025,7 +2053,7 @@ static int relocate_extents_range(struct btrfs_root *fs_root,
 	}
 	btrfs_release_path(&path);
 again:
-	cur_root = (pass % 2 == 0) ? ext2_root : fs_root;
+	cur_root = (pass % 2 == 0) ? image_root : fs_root;
 	num_extents = 0;
 
 	trans = btrfs_start_transaction(cur_root, 1);
@@ -2133,7 +2161,7 @@ fail:
  * relocate data in system chunk
  */
 static int cleanup_sys_chunk(struct btrfs_root *fs_root,
-			     struct btrfs_root *ext2_root)
+			     struct btrfs_root *image_root)
 {
 	struct btrfs_block_group_cache *cache;
 	int i, ret = 0;
@@ -2147,7 +2175,7 @@ static int cleanup_sys_chunk(struct btrfs_root *fs_root,
 
 		end_byte = cache->key.objectid + cache->key.offset;
 		if (cache->flags & BTRFS_BLOCK_GROUP_SYSTEM) {
-			ret = relocate_extents_range(fs_root, ext2_root,
+			ret = relocate_extents_range(fs_root, image_root,
 						     cache->key.objectid,
 						     end_byte);
 			if (ret)
@@ -2159,7 +2187,7 @@ static int cleanup_sys_chunk(struct btrfs_root *fs_root,
 		offset = btrfs_sb_offset(i);
 		offset &= ~((u64)BTRFS_STRIPE_LEN - 1);
 
-		ret = relocate_extents_range(fs_root, ext2_root,
+		ret = relocate_extents_range(fs_root, image_root,
 					     offset, offset + BTRFS_STRIPE_LEN);
 		if (ret)
 			goto fail;
@@ -2259,7 +2287,8 @@ err:
 }
 
 static int do_convert(const char *devname, int datacsum, int packing, int noxattr,
-		u32 nodesize, int copylabel, const char *fslabel, int progress)
+		u32 nodesize, int copylabel, const char *fslabel, int progress,
+		u64 features)
 {
 	int i, ret, blocks_per_node;
 	int fd = -1;
@@ -2269,8 +2298,10 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 	u64 super_bytenr;
 	ext2_filsys ext2_fs;
 	struct btrfs_root *root;
-	struct btrfs_root *ext2_root;
+	struct btrfs_root *image_root;
 	struct task_ctx ctx;
+	char features_buf[64];
+	struct btrfs_mkfs_config mkfs_cfg;
 
 	ret = open_ext2fs(devname, &ext2_fs);
 	if (ret) {
@@ -2288,7 +2319,7 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		fprintf(stderr, "filetype feature is missing\n");
 		goto fail;
 	}
-	if (btrfs_check_node_or_leaf_size(nodesize, blocksize))
+	if (btrfs_check_nodesize(nodesize, blocksize, features))
 		goto fail;
 	blocks_per_node = nodesize / blocksize;
 	ret = -blocks_per_node;
@@ -2311,16 +2342,32 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		fprintf(stderr, "unable to open %s\n", devname);
 		goto fail;
 	}
-	ret = make_btrfs(fd, devname, ext2_fs->super->s_volume_name,
-			 NULL, blocks, total_bytes, nodesize, nodesize,
-			 blocksize, blocksize, 0);
+	btrfs_parse_features_to_string(features_buf, features);
+	if (features == BTRFS_MKFS_DEFAULT_FEATURES)
+		strcat(features_buf, " (default)");
+
+	printf("create btrfs filesystem:\n");
+	printf("\tblocksize: %u\n", blocksize);
+	printf("\tnodesize:  %u\n", nodesize);
+	printf("\tfeatures:  %s\n", features_buf);
+
+	mkfs_cfg.label = ext2_fs->super->s_volume_name;
+	mkfs_cfg.fs_uuid = NULL;
+	memcpy(mkfs_cfg.blocks, blocks, sizeof(blocks));
+	mkfs_cfg.num_bytes = total_bytes;
+	mkfs_cfg.nodesize = nodesize;
+	mkfs_cfg.sectorsize = blocksize;
+	mkfs_cfg.stripesize = blocksize;
+	mkfs_cfg.features = features;
+
+	ret = make_btrfs(fd, &mkfs_cfg);
 	if (ret) {
 		fprintf(stderr, "unable to create initial ctree: %s\n",
 			strerror(-ret));
 		goto fail;
 	}
 	/* create a system chunk that maps the whole device */
-	ret = prepare_system_chunk(fd, super_bytenr, blocksize);
+	ret = prepare_system_chunk(fd, super_bytenr);
 	if (ret) {
 		fprintf(stderr, "unable to update system chunk\n");
 		goto fail;
@@ -2369,12 +2416,12 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		task_deinit(ctx.info);
 	}
 	printf("creating ext2fs image file.\n");
-	ext2_root = link_subvol(root, "ext2_saved", EXT2_IMAGE_SUBVOL_OBJECTID);
-	if (!ext2_root) {
+	image_root = link_subvol(root, "ext2_saved", CONV_IMAGE_SUBVOL_OBJECTID);
+	if (!image_root) {
 		fprintf(stderr, "unable to create subvol\n");
 		goto fail;
 	}
-	ret = create_ext2_image(ext2_root, ext2_fs, "image");
+	ret = create_ext2_image(image_root, ext2_fs, "image", datacsum);
 	if (ret) {
 		fprintf(stderr, "error during create_ext2_image %d\n", ret);
 		goto fail;
@@ -2386,12 +2433,12 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		fprintf(stderr, "copy label '%s'\n",
 				root->fs_info->super_copy->label);
 	} else if (copylabel == -1) {
-		strncpy(root->fs_info->super_copy->label, fslabel, BTRFS_LABEL_SIZE);
+		strcpy(root->fs_info->super_copy->label, fslabel);
 		fprintf(stderr, "set label to '%s'\n", fslabel);
 	}
 
 	printf("cleaning up system chunk.\n");
-	ret = cleanup_sys_chunk(root, ext2_root);
+	ret = cleanup_sys_chunk(root, image_root);
 	if (ret) {
 		fprintf(stderr, "error during cleanup_sys_chunk %d\n", ret);
 		goto fail;
@@ -2490,7 +2537,7 @@ static int do_rollback(const char *devname)
 	int ret;
 	int i;
 	struct btrfs_root *root;
-	struct btrfs_root *ext2_root;
+	struct btrfs_root *image_root;
 	struct btrfs_root *chunk_root;
 	struct btrfs_dir_item *dir;
 	struct btrfs_inode_item *inode;
@@ -2543,11 +2590,11 @@ static int do_rollback(const char *devname)
 
 	btrfs_init_path(&path);
 
-	key.objectid = EXT2_IMAGE_SUBVOL_OBJECTID;
+	key.objectid = CONV_IMAGE_SUBVOL_OBJECTID;
 	key.type = BTRFS_ROOT_ITEM_KEY;
 	key.offset = (u64)-1;
-	ext2_root = btrfs_read_fs_root(root->fs_info, &key);
-	if (!ext2_root || IS_ERR(ext2_root)) {
+	image_root = btrfs_read_fs_root(root->fs_info, &key);
+	if (!image_root || IS_ERR(image_root)) {
 		fprintf(stderr, "unable to open subvol %llu\n",
 			(unsigned long long)key.objectid);
 		goto fail;
@@ -2555,7 +2602,7 @@ static int do_rollback(const char *devname)
 
 	name = "image";
 	root_dir = btrfs_root_dirid(&root->root_item);
-	dir = btrfs_lookup_dir_item(NULL, ext2_root, &path,
+	dir = btrfs_lookup_dir_item(NULL, image_root, &path,
 				   root_dir, name, strlen(name), 0);
 	if (!dir || IS_ERR(dir)) {
 		fprintf(stderr, "unable to find file %s\n", name);
@@ -2567,7 +2614,7 @@ static int do_rollback(const char *devname)
 
 	objectid = key.objectid;
 
-	ret = btrfs_lookup_inode(NULL, ext2_root, &path, &key, 0);
+	ret = btrfs_lookup_inode(NULL, image_root, &path, &key, 0);
 	if (ret) {
 		fprintf(stderr, "unable to find inode item\n");
 		goto fail;
@@ -2580,7 +2627,7 @@ static int do_rollback(const char *devname)
 	key.objectid = objectid;
 	key.offset = 0;
 	btrfs_set_key_type(&key, BTRFS_EXTENT_DATA_KEY);
-	ret = btrfs_search_slot(NULL, ext2_root, &key, &path, 0, 0);
+	ret = btrfs_search_slot(NULL, image_root, &key, &path, 0, 0);
 	if (ret != 0) {
 		fprintf(stderr, "unable to find first file extent\n");
 		btrfs_release_path(&path);
@@ -2809,6 +2856,7 @@ static void print_usage(void)
 	printf("\t-l|--label LABEL       set filesystem label\n");
 	printf("\t-L|--copy-label        use label from converted filesystem\n");
 	printf("\t-p|--progress          show converting progress (default)\n");
+	printf("\t-O|--features LIST     comma separated list of filesystem features\n");
 	printf("\t--no-progress          show only overview, not the detailed progress\n");
 }
 
@@ -2825,10 +2873,10 @@ int main(int argc, char *argv[])
 	int usage_error = 0;
 	int progress = 1;
 	char *file;
-	char *fslabel = NULL;
+	char fslabel[BTRFS_LABEL_SIZE];
+	u64 features = BTRFS_MKFS_DEFAULT_FEATURES;
 
 	while(1) {
-		int long_index;
 		enum { GETOPT_VAL_NO_PROGRESS = 256 };
 		static const struct option long_options[] = {
 			{ "no-progress", no_argument, NULL,
@@ -2837,14 +2885,15 @@ int main(int argc, char *argv[])
 			{ "no-inline", no_argument, NULL, 'n' },
 			{ "no-xattr", no_argument, NULL, 'i' },
 			{ "rollback", no_argument, NULL, 'r' },
+			{ "features", required_argument, NULL, 'O' },
 			{ "progress", no_argument, NULL, 'p' },
 			{ "label", required_argument, NULL, 'l' },
 			{ "copy-label", no_argument, NULL, 'L' },
 			{ "nodesize", required_argument, NULL, 'N' },
+			{ "help", no_argument, NULL, GETOPT_VAL_HELP},
 			{ NULL, 0, NULL, 0 }
 		};
-		int c = getopt_long(argc, argv, "dinN:rl:Lp", long_options,
-				&long_index);
+		int c = getopt_long(argc, argv, "dinN:rl:LpO:", long_options, NULL);
 
 		if (c < 0)
 			break;
@@ -2866,13 +2915,13 @@ int main(int argc, char *argv[])
 				break;
 			case 'l':
 				copylabel = -1;
-				fslabel = strdup(optarg);
-				if (strlen(fslabel) > BTRFS_LABEL_SIZE) {
+				if (strlen(optarg) >= BTRFS_LABEL_SIZE) {
 					fprintf(stderr,
-						"warning: label too long, trimmed to %d bytes\n",
-						BTRFS_LABEL_SIZE);
-					fslabel[BTRFS_LABEL_SIZE] = 0;
+				"WARNING: label too long, trimmed to %d bytes\n",
+						BTRFS_LABEL_SIZE - 1);
 				}
+				strncpy(fslabel, optarg, BTRFS_LABEL_SIZE - 1);
+				fslabel[BTRFS_LABEL_SIZE - 1] = 0;
 				break;
 			case 'L':
 				copylabel = 1;
@@ -2880,12 +2929,44 @@ int main(int argc, char *argv[])
 			case 'p':
 				progress = 1;
 				break;
+			case 'O': {
+				char *orig = strdup(optarg);
+				char *tmp = orig;
+
+				tmp = btrfs_parse_fs_features(tmp, &features);
+				if (tmp) {
+					fprintf(stderr,
+						"Unrecognized filesystem feature '%s'\n",
+							tmp);
+					free(orig);
+					exit(1);
+				}
+				free(orig);
+				if (features & BTRFS_FEATURE_LIST_ALL) {
+					btrfs_list_all_fs_features(
+						~BTRFS_CONVERT_ALLOWED_FEATURES);
+					exit(0);
+				}
+				if (features & ~BTRFS_CONVERT_ALLOWED_FEATURES) {
+					char buf[64];
+
+					btrfs_parse_features_to_string(buf,
+						features & ~BTRFS_CONVERT_ALLOWED_FEATURES);
+					fprintf(stderr,
+						"ERROR: features not allowed for convert: %s\n",
+						buf);
+					exit(1);
+				}
+
+				break;
+				}
 			case GETOPT_VAL_NO_PROGRESS:
 				progress = 0;
 				break;
+			case GETOPT_VAL_HELP:
 			default:
 				print_usage();
-				return 1;
+				return c != GETOPT_VAL_HELP;
 		}
 	}
 	argc = argc - optind;
@@ -2921,7 +3002,7 @@ int main(int argc, char *argv[])
 		ret = do_rollback(file);
 	} else {
 		ret = do_convert(file, datacsum, packing, noxattr, nodesize,
-				copylabel, fslabel, progress);
+				copylabel, fslabel, progress, features);
 	}
 	if (ret)
 		return 1;

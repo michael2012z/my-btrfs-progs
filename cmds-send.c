@@ -31,8 +31,9 @@
 #include <libgen.h>
 #include <mntent.h>
 #include <assert.h>
-
+#include <getopt.h>
 #include <uuid/uuid.h>
+#include <limits.h>
 
 #include "ctree.h"
 #include "ioctl.h"
@@ -173,11 +174,16 @@ out:
 
 static int add_clone_source(struct btrfs_send *s, u64 root_id)
 {
+	void *tmp;
+
+	tmp = s->clone_sources;
 	s->clone_sources = realloc(s->clone_sources,
 		sizeof(*s->clone_sources) * (s->clone_sources_count + 1));
 
-	if (!s->clone_sources)
+	if (!s->clone_sources) {
+		free(tmp);
 		return -ENOMEM;
+	}
 	s->clone_sources[s->clone_sources_count++] = root_id;
 
 	return 0;
@@ -192,13 +198,13 @@ static int write_buf(int fd, const void *buf, int size)
 		ret = write(fd, (char*)buf + pos, size - pos);
 		if (ret < 0) {
 			ret = -errno;
-			fprintf(stderr, "ERROR: failed to dump stream. %s",
+			fprintf(stderr, "ERROR: failed to dump stream. %s\n",
 					strerror(-ret));
 			goto out;
 		}
 		if (!ret) {
 			ret = -EIO;
-			fprintf(stderr, "ERROR: failed to dump stream. %s",
+			fprintf(stderr, "ERROR: failed to dump stream. %s\n",
 					strerror(-ret));
 			goto out;
 		}
@@ -243,7 +249,8 @@ out:
 }
 
 static int do_send(struct btrfs_send *send, u64 parent_root_id,
-		   int is_first_subvol, int is_last_subvol, char *subvol)
+		   int is_first_subvol, int is_last_subvol, char *subvol,
+		   u64 flags)
 {
 	int ret;
 	pthread_t t_read;
@@ -281,6 +288,7 @@ static int do_send(struct btrfs_send *send, u64 parent_root_id,
 		goto out;
 	}
 
+	io_send.flags = flags;
 	io_send.clone_sources = (__u64*)send->clone_sources;
 	io_send.clone_sources_count = send->clone_sources_count;
 	io_send.parent_root = parent_root_id;
@@ -424,9 +432,8 @@ out:
 int cmd_send(int argc, char **argv)
 {
 	char *subvol = NULL;
-	int c;
 	int ret;
-	char *outname = NULL;
+	char outname[PATH_MAX];
 	struct btrfs_send send;
 	u32 i;
 	char *mount_root = NULL;
@@ -435,11 +442,22 @@ int cmd_send(int argc, char **argv)
 	u64 parent_root_id = 0;
 	int full_send = 1;
 	int new_end_cmd_semantic = 0;
+	u64 send_flags = 0;
 
 	memset(&send, 0, sizeof(send));
 	send.dump_fd = fileno(stdout);
+	outname[0] = 0;
 
-	while ((c = getopt(argc, argv, "vec:f:i:p:")) != -1) {
+	while (1) {
+		enum { GETOPT_VAL_SEND_NO_DATA = 256 };
+		static const struct option long_options[] = {
+			{ "no-data", no_argument, NULL, GETOPT_VAL_SEND_NO_DATA }
+		};
+		int c = getopt_long(argc, argv, "vec:f:i:p:", long_options, NULL);
+
+		if (c < 0)
+			break;
+
 		switch (c) {
 		case 'v':
 			g_verbose++;
@@ -496,7 +514,13 @@ int cmd_send(int argc, char **argv)
 			full_send = 0;
 			break;
 		case 'f':
-			outname = optarg;
+			if (arg_copy_path(outname, optarg, sizeof(outname))) {
+				fprintf(stderr,
+				    "ERROR: output file path too long (%zu)\n",
+				    strlen(optarg));
+				ret = 1;
+				goto out;
+			}
 			break;
 		case 'p':
 			if (snapshot_parent) {
@@ -530,6 +554,9 @@ int cmd_send(int argc, char **argv)
 				"ERROR: -i was removed, use -c instead\n");
 			ret = 1;
 			goto out;
+		case GETOPT_VAL_SEND_NO_DATA:
+			send_flags |= BTRFS_SEND_FLAG_NO_FILE_DATA;
+			break;
 		case '?':
 		default:
 			fprintf(stderr, "ERROR: send args invalid.\n");
@@ -541,7 +568,7 @@ int cmd_send(int argc, char **argv)
 	if (check_argc_min(argc - optind, 1))
 		usage(cmd_send_usage);
 
-	if (outname != NULL) {
+	if (outname[0]) {
 		send.dump_fd = creat(outname, 0600);
 		if (send.dump_fd == -1) {
 			ret = -errno;
@@ -632,6 +659,9 @@ int cmd_send(int argc, char **argv)
 		}
 	}
 
+	if (send_flags & BTRFS_SEND_FLAG_NO_FILE_DATA)
+		printf("Mode NO_FILE_DATA enabled\n");
+
 	for (i = optind; i < argc; i++) {
 		int is_first_subvol;
 		int is_last_subvol;
@@ -678,7 +708,7 @@ int cmd_send(int argc, char **argv)
 			is_last_subvol = 1;
 		}
 		ret = do_send(&send, parent_root_id, is_first_subvol,
-			      is_last_subvol, subvol);
+			      is_last_subvol, subvol, send_flags);
 		if (ret < 0)
 			goto out;
 
@@ -731,5 +761,9 @@ const char * const cmd_send_usage[] = {
 	"-f <outfile>     Output is normally written to stdout. To write to",
 	"                 a file, use this option. An alternative would be to",
 	"                 use pipes.",
+	"--no-data        send in NO_FILE_DATA mode, Note: the output stream",
+	"                 does not contain any file data and thus cannot be used",
+	"                 to transfer changes. This mode is faster and useful to",
+	"                 show the differences in metadata.",
 	NULL
 };

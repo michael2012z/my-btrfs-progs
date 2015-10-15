@@ -28,7 +28,8 @@
 #include "ctree.h"
 #include "ioctl.h"
 #include "utils.h"
-#include "cmds-fi-disk_usage.h"
+#include "volumes.h"
+#include "cmds-fi-usage.h"
 
 #include "commands.h"
 
@@ -37,7 +38,7 @@ static const char * const device_cmd_group_usage[] = {
 	NULL
 };
 
-static const char * const cmd_add_dev_usage[] = {
+static const char * const cmd_device_add_usage[] = {
 	"btrfs device add [options] <device> [<device>...] <path>",
 	"Add a device to a filesystem",
 	"-K|--nodiscard    do not perform whole device TRIM",
@@ -45,24 +46,23 @@ static const char * const cmd_add_dev_usage[] = {
 	NULL
 };
 
-static int cmd_add_dev(int argc, char **argv)
+static int cmd_device_add(int argc, char **argv)
 {
 	char	*mntpnt;
 	int	i, fdmnt, ret=0, e;
 	DIR	*dirstream = NULL;
 	int discard = 1;
 	int force = 0;
-	char estr[100];
 
 	while (1) {
-		int long_index;
+		int c;
 		static const struct option long_options[] = {
 			{ "nodiscard", optional_argument, NULL, 'K'},
 			{ "force", no_argument, NULL, 'f'},
 			{ NULL, 0, NULL, 0}
 		};
-		int c = getopt_long(argc, argv, "Kf", long_options,
-					&long_index);
+
+		c = getopt_long(argc, argv, "Kf", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -73,22 +73,20 @@ static int cmd_add_dev(int argc, char **argv)
 			force = 1;
 			break;
 		default:
-			usage(cmd_add_dev_usage);
+			usage(cmd_device_add_usage);
 		}
 	}
 
 	argc = argc - optind;
 
 	if (check_argc_min(argc, 2))
-		usage(cmd_add_dev_usage);
+		usage(cmd_device_add_usage);
 
 	mntpnt = argv[optind + argc - 1];
 
-	fdmnt = open_file_or_dir(mntpnt, &dirstream);
-	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", mntpnt);
+	fdmnt = btrfs_open_dir(mntpnt, &dirstream, 1);
+	if (fdmnt < 0)
 		return 1;
-	}
 
 	for (i = optind; i < optind + argc - 1; i++){
 		struct btrfs_ioctl_vol_args ioctl_args;
@@ -97,9 +95,8 @@ static int cmd_add_dev(int argc, char **argv)
 		int mixed = 0;
 		char *path;
 
-		res = test_dev_for_mkfs(argv[i], force, estr);
+		res = test_dev_for_mkfs(argv[i], force);
 		if (res) {
-			fprintf(stderr, "%s", estr);
 			ret++;
 			continue;
 		}
@@ -128,6 +125,7 @@ static int cmd_add_dev(int argc, char **argv)
 			goto error_out;
 		}
 
+		memset(&ioctl_args, 0, sizeof(ioctl_args));
 		strncpy_null(ioctl_args.name, path);
 		res = ioctl(fdmnt, BTRFS_IOC_ADD_DEV, &ioctl_args);
 		e = errno;
@@ -141,54 +139,50 @@ static int cmd_add_dev(int argc, char **argv)
 
 error_out:
 	close_file_or_dir(fdmnt, dirstream);
+	btrfs_close_all_devices();
 	return !!ret;
 }
 
-static const char * const cmd_rm_dev_usage[] = {
-	"btrfs device delete <device> [<device>...] <path>",
-	"Remove a device from a filesystem",
-	NULL
-};
-
-static int cmd_rm_dev(int argc, char **argv)
+static int _cmd_device_remove(int argc, char **argv,
+		const char * const *usagestr)
 {
 	char	*mntpnt;
 	int	i, fdmnt, ret=0, e;
 	DIR	*dirstream = NULL;
 
 	if (check_argc_min(argc, 3))
-		usage(cmd_rm_dev_usage);
+		usage(usagestr);
 
 	mntpnt = argv[argc - 1];
 
-	fdmnt = open_file_or_dir(mntpnt, &dirstream);
-	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", mntpnt);
+	fdmnt = btrfs_open_dir(mntpnt, &dirstream, 1);
+	if (fdmnt < 0)
 		return 1;
-	}
 
 	for(i=1 ; i < argc - 1; i++ ){
 		struct	btrfs_ioctl_vol_args arg;
 		int	res;
 
-		if (!is_block_device(argv[i])) {
+		if (is_block_device(argv[i]) != 1) {
 			fprintf(stderr,
 				"ERROR: %s is not a block device\n", argv[i]);
 			ret++;
 			continue;
 		}
+		memset(&arg, 0, sizeof(arg));
 		strncpy_null(arg.name, argv[i]);
 		res = ioctl(fdmnt, BTRFS_IOC_RM_DEV, &arg);
 		e = errno;
-		if (res > 0) {
+		if (res) {
+			const char *msg;
+
+			if (res > 0)
+				msg = btrfs_err_str(res);
+			else
+				msg = strerror(e);
 			fprintf(stderr,
 				"ERROR: error removing the device '%s' - %s\n",
-				argv[i], btrfs_err_str(res));
-			ret++;
-		} else if (res < 0) {
-			fprintf(stderr,
-				"ERROR: error removing the device '%s' - %s\n",
-				argv[i], strerror(e));
+				argv[i], msg);
 			ret++;
 		}
 	}
@@ -197,14 +191,36 @@ static int cmd_rm_dev(int argc, char **argv)
 	return !!ret;
 }
 
-static const char * const cmd_scan_dev_usage[] = {
+static const char * const cmd_device_remove_usage[] = {
+	"btrfs device remove <device> [<device>...] <path>",
+	"Remove a device from a filesystem",
+	NULL
+};
+
+static int cmd_device_remove(int argc, char **argv)
+{
+	return _cmd_device_remove(argc, argv, cmd_device_remove_usage);
+}
+
+static const char * const cmd_device_delete_usage[] = {
+	"btrfs device delete <device> [<device>...] <path>",
+	"Remove a device from a filesystem",
+	NULL
+};
+
+static int cmd_device_delete(int argc, char **argv)
+{
+	return _cmd_device_remove(argc, argv, cmd_device_delete_usage);
+}
+
+static const char * const cmd_device_scan_usage[] = {
 	"btrfs device scan [(-d|--all-devices)|<device> [<device>...]]",
 	"Scan devices for a btrfs filesystem",
 	" -d|--all-devices (deprecated)",
 	NULL
 };
 
-static int cmd_scan_dev(int argc, char **argv)
+static int cmd_device_scan(int argc, char **argv)
 {
 	int i;
 	int devstart = 1;
@@ -213,13 +229,13 @@ static int cmd_scan_dev(int argc, char **argv)
 
 	optind = 1;
 	while (1) {
-		int long_index;
+		int c;
 		static const struct option long_options[] = {
 			{ "all-devices", no_argument, NULL, 'd'},
 			{ NULL, 0, NULL, 0}
 		};
-		int c = getopt_long(argc, argv, "d", long_options,
-				    &long_index);
+
+		c = getopt_long(argc, argv, "d", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -227,12 +243,12 @@ static int cmd_scan_dev(int argc, char **argv)
 			all = 1;
 			break;
 		default:
-			usage(cmd_scan_dev_usage);
+			usage(cmd_device_scan_usage);
 		}
 	}
 
 	if (all && check_argc_max(argc, 2))
-		usage(cmd_scan_dev_usage);
+		usage(cmd_device_scan_usage);
 
 	if (all || argc == 1) {
 		printf("Scanning for Btrfs filesystems\n");
@@ -248,7 +264,7 @@ static int cmd_scan_dev(int argc, char **argv)
 	for( i = devstart ; i < argc ; i++ ){
 		char *path;
 
-		if (!is_block_device(argv[i])) {
+		if (is_block_device(argv[i]) != 1) {
 			fprintf(stderr,
 				"ERROR: %s is not a block device\n", argv[i]);
 			ret = 1;
@@ -272,16 +288,17 @@ static int cmd_scan_dev(int argc, char **argv)
 	}
 
 out:
+	btrfs_close_all_devices();
 	return !!ret;
 }
 
-static const char * const cmd_ready_dev_usage[] = {
+static const char * const cmd_device_ready_usage[] = {
 	"btrfs device ready <device>",
 	"Check device to see if it has all of its devices in cache for mounting",
 	NULL
 };
 
-static int cmd_ready_dev(int argc, char **argv)
+static int cmd_device_ready(int argc, char **argv)
 {
 	struct	btrfs_ioctl_vol_args args;
 	int	fd;
@@ -289,7 +306,7 @@ static int cmd_ready_dev(int argc, char **argv)
 	char	*path;
 
 	if (check_argc_min(argc, 2))
-		usage(cmd_ready_dev_usage);
+		usage(cmd_device_ready_usage);
 
 	fd = open("/dev/btrfs-control", O_RDWR);
 	if (fd < 0) {
@@ -306,14 +323,15 @@ static int cmd_ready_dev(int argc, char **argv)
 		goto out;
 	}
 
-	if (!is_block_device(path)) {
+	if (is_block_device(path) != 1) {
 		fprintf(stderr,
 			"ERROR: %s is not a block device\n", path);
 		ret = 1;
 		goto out;
 	}
 
-	strncpy(args.name, path, BTRFS_PATH_NAME_MAX);
+	memset(&args, 0, sizeof(args));
+	strncpy_null(args.name, path);
 	ret = ioctl(fd, BTRFS_IOC_DEVICES_READY, &args);
 	if (ret < 0) {
 		fprintf(stderr, "ERROR: unable to determine if the device '%s'"
@@ -328,13 +346,15 @@ out:
 	return ret;
 }
 
-static const char * const cmd_dev_stats_usage[] = {
+static const char * const cmd_device_stats_usage[] = {
 	"btrfs device stats [-z] <path>|<device>",
-	"Show current device IO stats. -z to reset stats afterwards.",
+	"Show current device IO stats.",
+	"",
+	"-z                     show current stats and reset values to zero",
 	NULL
 };
 
-static int cmd_dev_stats(int argc, char **argv)
+static int cmd_device_stats(int argc, char **argv)
 {
 	char *dev_path;
 	struct btrfs_ioctl_fs_info_args fi_args;
@@ -355,13 +375,13 @@ static int cmd_dev_stats(int argc, char **argv)
 			break;
 		case '?':
 		default:
-			usage(cmd_dev_stats_usage);
+			usage(cmd_device_stats_usage);
 		}
 	}
 
 	argc = argc - optind;
 	if (check_argc_exact(argc, 1))
-		usage(cmd_dev_stats_usage);
+		usage(cmd_device_stats_usage);
 
 	dev_path = argv[optind];
 
@@ -446,23 +466,15 @@ static int cmd_dev_stats(int argc, char **argv)
 out:
 	free(di_args);
 	close_file_or_dir(fdmnt, dirstream);
+	btrfs_close_all_devices();
 
 	return err;
 }
 
-const char * const cmd_device_usage_usage[] = {
+static const char * const cmd_device_usage_usage[] = {
 	"btrfs device usage [options] <path> [<path>..]",
 	"Show detailed information about internal allocations in devices.",
-	"-b|--raw           raw numbers in bytes",
-	"-h|--human-readable",
-	"                   human friendly numbers, base 1024 (default)",
-	"-H                 human friendly numbers, base 1000",
-	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
-	"--si               use 1000 as a base (kB, MB, GB, TB)",
-	"-k|--kbytes        show sizes in KiB, or kB with --si",
-	"-m|--mbytes        show sizes in MiB, or MB with --si",
-	"-g|--gbytes        show sizes in GiB, or GB with --si",
-	"-t|--tbytes        show sizes in TiB, or TB with --si",
+	HELPINFO_OUTPUT_UNIT_DF,
 	NULL
 };
 
@@ -495,79 +507,27 @@ out:
 	return ret;
 }
 
-int cmd_device_usage(int argc, char **argv)
+static int cmd_device_usage(int argc, char **argv)
 {
-	unsigned unit_mode = UNITS_DEFAULT;
+	unsigned unit_mode;
 	int ret = 0;
-	int	i, more_than_one = 0;
+	int more_than_one = 0;
+	int i;
 
-	optind = 1;
-	while (1) {
-		int long_index;
-		static const struct option long_options[] = {
-			{ "raw", no_argument, NULL, 'b'},
-			{ "kbytes", no_argument, NULL, 'k'},
-			{ "mbytes", no_argument, NULL, 'm'},
-			{ "gbytes", no_argument, NULL, 'g'},
-			{ "tbytes", no_argument, NULL, 't'},
-			{ "si", no_argument, NULL, GETOPT_VAL_SI},
-			{ "iec", no_argument, NULL, GETOPT_VAL_IEC},
-			{ "human-readable", no_argument, NULL,
-				GETOPT_VAL_HUMAN_READABLE},
-			{ NULL, 0, NULL, 0 }
-		};
-		int c = getopt_long(argc, argv, "bhHkmgt", long_options,
-				&long_index);
+	unit_mode = get_unit_mode_from_arg(&argc, argv, 1);
 
-		if (c < 0)
-			break;
-		switch (c) {
-		case 'b':
-			unit_mode = UNITS_RAW;
-			break;
-		case 'k':
-			units_set_base(&unit_mode, UNITS_KBYTES);
-			break;
-		case 'm':
-			units_set_base(&unit_mode, UNITS_MBYTES);
-			break;
-		case 'g':
-			units_set_base(&unit_mode, UNITS_GBYTES);
-			break;
-		case 't':
-			units_set_base(&unit_mode, UNITS_TBYTES);
-			break;
-		case GETOPT_VAL_HUMAN_READABLE:
-		case 'h':
-			unit_mode = UNITS_HUMAN_BINARY;
-			break;
-		case 'H':
-			unit_mode = UNITS_HUMAN_DECIMAL;
-			break;
-		case GETOPT_VAL_SI:
-			units_set_mode(&unit_mode, UNITS_DECIMAL);
-			break;
-		case GETOPT_VAL_IEC:
-			units_set_mode(&unit_mode, UNITS_BINARY);
-			break;
-		default:
-			usage(cmd_device_usage_usage);
-		}
-	}
-
-	if (check_argc_min(argc - optind, 1))
+	if (check_argc_min(argc, 2) || argv[1][0] == '-')
 		usage(cmd_device_usage_usage);
 
-	for (i = optind; i < argc ; i++) {
+	for (i = 1; i < argc; i++) {
 		int fd;
-		DIR	*dirstream = NULL;
+		DIR *dirstream = NULL;
+
 		if (more_than_one)
 			printf("\n");
 
-		fd = open_file_or_dir(argv[i], &dirstream);
+		fd = btrfs_open_dir(argv[i], &dirstream, 1);
 		if (fd < 0) {
-			fprintf(stderr, "ERROR: can't access '%s'\n",
-				argv[1]);
 			ret = 1;
 			goto out;
 		}
@@ -583,13 +543,18 @@ out:
 	return !!ret;
 }
 
+static const char device_cmd_group_info[] =
+"manage and query devices in the filesystem";
+
 const struct cmd_group device_cmd_group = {
-	device_cmd_group_usage, NULL, {
-		{ "add", cmd_add_dev, cmd_add_dev_usage, NULL, 0 },
-		{ "delete", cmd_rm_dev, cmd_rm_dev_usage, NULL, 0 },
-		{ "scan", cmd_scan_dev, cmd_scan_dev_usage, NULL, 0 },
-		{ "ready", cmd_ready_dev, cmd_ready_dev_usage, NULL, 0 },
-		{ "stats", cmd_dev_stats, cmd_dev_stats_usage, NULL, 0 },
+	device_cmd_group_usage, device_cmd_group_info, {
+		{ "add", cmd_device_add, cmd_device_add_usage, NULL, 0 },
+		{ "delete", cmd_device_delete, cmd_device_delete_usage, NULL,
+			CMD_ALIAS },
+		{ "remove", cmd_device_remove, cmd_device_remove_usage, NULL, 0 },
+		{ "scan", cmd_device_scan, cmd_device_scan_usage, NULL, 0 },
+		{ "ready", cmd_device_ready, cmd_device_ready_usage, NULL, 0 },
+		{ "stats", cmd_device_stats, cmd_device_stats_usage, NULL, 0 },
 		{ "usage", cmd_device_usage,
 			cmd_device_usage_usage, NULL, 0 },
 		NULL_CMD_STRUCT

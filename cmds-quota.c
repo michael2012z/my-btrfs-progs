@@ -109,7 +109,7 @@ static int cmd_quota_rescan(int argc, char **argv)
 	int e;
 	char *path = NULL;
 	struct btrfs_ioctl_quota_rescan_args args;
-	int ioctlnum = BTRFS_IOC_QUOTA_RESCAN;
+	unsigned long ioctlnum = BTRFS_IOC_QUOTA_RESCAN;
 	DIR *dirstream = NULL;
 	int wait_for_completion = 0;
 
@@ -176,8 +176,11 @@ static int cmd_quota_rescan(int argc, char **argv)
 	return 0;
 }
 
+static const char quota_cmd_group_info[] =
+"manage filesystem quota settings";
+
 const struct cmd_group quota_cmd_group = {
-	quota_cmd_group_usage, NULL, {
+	quota_cmd_group_usage, quota_cmd_group_info, {
 		{ "enable", cmd_quota_enable, cmd_quota_enable_usage, NULL, 0 },
 		{ "disable", cmd_quota_disable, cmd_quota_disable_usage,
 		   NULL, 0 },

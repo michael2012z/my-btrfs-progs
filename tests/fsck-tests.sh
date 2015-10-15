@@ -5,31 +5,48 @@
 # It's GPL, same as everything else in this tree.
 #
 
-unset top
+unset TOP
 unset LANG
 LANG=C
-script_dir=$(dirname $(realpath $0))
-top=$(realpath $script_dir/../)
+SCRIPT_DIR=$(dirname $(readlink -f $0))
+TOP=$(readlink -f $SCRIPT_DIR/../)
 TEST_DEV=${TEST_DEV:-}
-TEST_MNT=${TEST_MNT:-$top/tests/mnt}
-RESULT="$top/tests/fsck-tests-results.txt"
+RESULTS="$TOP/tests/fsck-tests-results.txt"
 
-source $top/tests/common
+source $TOP/tests/common
 
-# Allow child test to use $top and $RESULT
-export top
-export RESULT
+# Allow child test to use $TOP and $RESULTS
+export TOP
+export RESULTS
 # For custom script needs to verfiy recovery
-export TEST_MNT
 export LANG
 
-rm -f $RESULT
-mkdir -p $TEST_MNT || _fail "unable to create mount point on $TEST_MNT"
+rm -f $RESULTS
 
 # test rely on corrupting blocks tool
 check_prereq btrfs-corrupt-block
 check_prereq btrfs-image
 check_prereq btrfs
+
+run_one_test() {
+	local testname
+
+	testname="$1"
+	echo "    [TEST]   $(basename $testname)"
+	cd $testname
+	echo "=== Entering $testname" >> $RESULTS
+	if [ -x test.sh ]; then
+		# Type 2
+		./test.sh
+		if [ $? -ne 0 ]; then
+			_fail "test failed for case $(basename $testname)"
+		fi
+	else
+		# Type 1
+		check_all_images `pwd`
+	fi
+	cd $TOP
+}
 
 # Each dir contains one type of error for btrfsck test.
 # Each dir must be one of the following 2 types:
@@ -44,19 +61,8 @@ check_prereq btrfs
 #    This is for case btrfs-image can't dump or case needs extra
 #    check/verify
 
-for i in $(find $top/tests/fsck-tests -maxdepth 1 -mindepth 1 -type d | sort)
+for i in $(find $TOP/tests/fsck-tests -maxdepth 1 -mindepth 1 -type d	\
+	${TEST:+-name "$TEST"} | sort)
 do
-	echo "    [TEST]   $(basename $i)"
-	cd $i
-	if [ -x test.sh ]; then
-		# Type 2
-		./test.sh
-		if [ $? -ne 0 ]; then
-			_fail "test failed for case $(basename $i)"
-		fi
-	else
-		# Type 1
-		check_all_images `pwd`
-	fi
-	cd $top
+	run_one_test "$i"
 done

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-source $top/tests/common
+source $TOP/tests/common
 
 # Check file list for leaf corruption, no regular/preallocated
 # file extent case.
@@ -34,10 +34,10 @@ leaf_no_data_ext_list=(
 generate_leaf_corrupt_no_data_ext()
 {
 	dest=$1
-	echo "generating leaf_corrupt_no_data_ext.btrfs-image" >> $RESULT
-	tar xJf ./no_data_extent.tar.xz || \
+	echo "generating leaf_corrupt_no_data_ext.btrfs-image" >> $RESULTS
+	tar --no-same-owner -xJf ./no_data_extent.tar.xz || \
 		_fail "failed to extract leaf_corrupt_no_data_ext.btrfs-image"
-	btrfs-image -r test.img.btrfs-image $dest || \
+	$TOP/btrfs-image -r test.img.btrfs-image $dest || \
 		_fail "failed to extract leaf_corrupt_no_data_ext.btrfs-image"
 
 	# leaf at 20832256 contains no regular data extent, clear its csum to
@@ -85,12 +85,7 @@ check_inode()
 check_leaf_corrupt_no_data_ext()
 {
 	image=$1
-	if [ -z $TEST_MNT ]; then
-		echo "\$TEST_MNT not set, use $(pwd)/tmp as fallback"
-		TEST_MNT="$(pwd)/tmp"
-	fi
-	mkdir -p $TEST_MNT || _fail "failed to create mount point"
-	$SUDO_HELPER mount $image -o ro $TEST_MNT
+	$SUDO_HELPER mount -o loop $image -o ro $TEST_MNT
 
 	i=0
 	while [ $i -lt ${#leaf_no_data_ext_list[@]} ]; do

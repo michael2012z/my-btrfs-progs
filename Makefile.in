@@ -10,16 +10,19 @@ INSTALL = @INSTALL@
 DISABLE_DOCUMENTATION = @DISABLE_DOCUMENTATION@
 DISABLE_BTRFSCONVERT = @DISABLE_BTRFSCONVERT@
 
+EXTRA_CFLAGS :=
+EXTRA_LDFLAGS :=
+
 # Common build flags
 CFLAGS = @CFLAGS@ \
 	 -include config.h \
 	 -DBTRFS_FLAT_INCLUDES \
 	 -D_XOPEN_SOURCE=700  \
 	 -fno-strict-aliasing \
-	 -fPIC
+	 -fPIC $(EXTRA_CFLAGS)
 
 LDFLAGS = @LDFLAGS@ \
-	  -rdynamic
+	  -rdynamic $(EXTRA_LDFLAGS)
 
 LIBS = @UUID_LIBS@ @BLKID_LIBS@ @ZLIB_LIBS@ @LZO2_LIBS@ -L. -pthread
 LIBBTRFS_LIBS = $(LIBS)
@@ -40,7 +43,7 @@ cmds_objects = cmds-subvolume.o cmds-filesystem.o cmds-device.o cmds-scrub.o \
 	       cmds-inspect.o cmds-balance.o cmds-send.o cmds-receive.o \
 	       cmds-quota.o cmds-qgroup.o cmds-replace.o cmds-check.o \
 	       cmds-restore.o cmds-rescue.o chunk-recover.o super-recover.o \
-	       cmds-property.o cmds-fi-disk_usage.o
+	       cmds-property.o cmds-fi-usage.o
 libbtrfs_objects = send-stream.o send-utils.o rbtree.o btrfs-list.o crc32c.o \
 		   uuid-tree.o utils-lib.o rbtree-utils.o
 libbtrfs_headers = send-stream.h send-utils.h send.h rbtree.h btrfs-list.h \
@@ -161,11 +164,23 @@ $(BUILDDIRS):
 	@echo "Making all in $(patsubst build-%,%,$@)"
 	$(Q)$(MAKE) $(MAKEOPTS) -C $(patsubst build-%,%,$@)
 
-test: btrfs btrfs-convert btrfs-image btrfs-corrupt-block
-	$(Q)for t in $(TESTS); do \
-		echo "    [TEST]   $$t"; \
-		bash tests/$$t || exit 1; \
-	done
+test-convert: btrfs btrfs-convert
+	@echo "    [TEST]   convert-tests.sh"
+	$(Q)bash tests/convert-tests.sh
+
+test-fsck: btrfs btrfs-image btrfs-corrupt-block btrfs-debug-tree mkfs.btrfs
+	@echo "    [TEST]   fsck-tests.sh"
+	$(Q)bash tests/fsck-tests.sh
+
+test-misc: btrfs btrfs-image btrfs-corrupt-block btrfs-debug-tree mkfs.btrfs btrfstune
+	@echo "    [TEST]   misc-tests.sh"
+	$(Q)bash tests/misc-tests.sh
+
+test-clean:
+	@echo "Cleaning tests"
+	$(Q)bash tests/clean-tests.sh
+
+test: test-fsck test-convert test-misc
 
 #
 # NOTE: For static compiles, you need to have all the required libs
@@ -184,7 +199,7 @@ $(libs_shared): $(libbtrfs_objects) $(lib_links) send.h
 
 $(libs_static): $(libbtrfs_objects)
 	@echo "    [AR]     $@"
-	$(Q)$(AR) cru libbtrfs.a $(libbtrfs_objects)
+	$(Q)$(AR) cr libbtrfs.a $(libbtrfs_objects)
 
 $(lib_links):
 	@echo "    [LN]     $@"
@@ -332,8 +347,10 @@ install: $(libs) $(progs_install) $(INSTALLDIRS)
 
 install-static: $(progs_static) $(INSTALLDIRS)
 	for p in $(progs_static) ; do \
-		$(INSTALL) -D -m755 $$p $(DESTDIR)$(bindir)/`basename $$p .static` ; \
+		$(INSTALL) -D -m755 $$p $(DESTDIR)$(bindir)/ ; \
 	done
+	# btrfsck is a link to btrfs in the src tree, make it so for installed file as well
+	$(LN_S) -f btrfs.static $(DESTDIR)$(bindir)/btrfsck.static
 
 $(INSTALLDIRS):
 	@echo "Making install in $(patsubst install-%,%,$@)"
@@ -347,5 +364,5 @@ uninstall:
 	cd $(DESTDIR)$(bindir); $(RM) -f btrfsck fsck.btrfs $(progs_install)
 
 ifneq ($(MAKECMDGOALS),clean)
--include $(objects:.o=.o.d) $(cmd-objects:.o=.o.d) $(subst .btrfs,, $(filter-out btrfsck.o.d, $(progs:=.o.d)))
+-include $(objects:.o=.o.d) $(cmds_objects:.o=.o.d) $(subst .btrfs,, $(filter-out btrfsck.o.d, $(progs:=.o.d)))
 endif

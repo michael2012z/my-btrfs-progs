@@ -22,8 +22,6 @@
 #include "commands.h"
 #include "utils.h"
 
-static char argv0_buf[ARGV0_BUF_SIZE];
-
 #define USAGE_SHORT		1U
 #define USAGE_LONG		2U
 #define USAGE_OPTIONS		4U
@@ -37,7 +35,7 @@ static int do_usage_one_command(const char * const *usagestr,
 	if (!usagestr || !*usagestr)
 		return -1;
 
-	fprintf(outf, "%s%s\n", (flags & USAGE_LISTING) ? "    " : "usage: ",
+	fprintf(outf, "%s%s", (flags & USAGE_LISTING) ? "    " : "usage: ",
 		*usagestr++);
 
 	/* a short one-line description (mandatory) */
@@ -45,6 +43,7 @@ static int do_usage_one_command(const char * const *usagestr,
 		return 0;
 	else if (!*usagestr)
 		return -2;
+	fputc('\n', outf);
 
 	if (flags & USAGE_LISTING)
 		pad = 8;
@@ -81,11 +80,13 @@ static int do_usage_one_command(const char * const *usagestr,
 
 static int usage_command_internal(const char * const *usagestr,
 				  const char *token, int full, int lst,
-				  FILE *outf)
+				  int alias, FILE *outf)
 {
-	unsigned int flags = USAGE_SHORT;
+	unsigned int flags = 0;
 	int ret;
 
+	if (!alias)
+		flags |= USAGE_SHORT;
 	if (full)
 		flags |= USAGE_LONG | USAGE_OPTIONS;
 	if (lst)
@@ -110,7 +111,7 @@ static void usage_command_usagestr(const char * const *usagestr,
 	FILE *outf = err ? stderr : stdout;
 	int ret;
 
-	ret = usage_command_internal(usagestr, token, full, 0, outf);
+	ret = usage_command_internal(usagestr, token, full, 0, 0, outf);
 	if (!ret)
 		fputc('\n', outf);
 }
@@ -133,7 +134,7 @@ static void usage_command_group_internal(const struct cmd_group *grp, int full,
 	int do_sep = 0;
 
 	for (; cmd->token; cmd++) {
-		if (cmd->hidden)
+		if (cmd->flags & CMD_HIDDEN)
 			continue;
 
 		if (full && cmd != grp->commands)
@@ -146,7 +147,7 @@ static void usage_command_group_internal(const struct cmd_group *grp, int full,
 			}
 
 			usage_command_internal(cmd->usagestr, cmd->token, full,
-					       1, outf);
+					       1, cmd->flags & CMD_ALIAS, outf);
 			continue;
 		}
 
@@ -160,6 +161,50 @@ static void usage_command_group_internal(const struct cmd_group *grp, int full,
 		if (!full)
 			do_sep = 1;
 	}
+}
+
+void usage_command_group_short(const struct cmd_group *grp)
+{
+	const char * const *usagestr = grp->usagestr;
+	FILE *outf = stdout;
+	const struct cmd_struct *cmd;
+
+	if (usagestr && *usagestr) {
+		fprintf(outf, "usage: %s\n", *usagestr++);
+		while (*usagestr)
+			fprintf(outf, "   or: %s\n", *usagestr++);
+	}
+
+	fputc('\n', outf);
+
+	fprintf(outf, "Command groups:\n");
+	for (cmd = grp->commands; cmd->token; cmd++) {
+		if (cmd->flags & CMD_HIDDEN)
+			continue;
+
+		if (!cmd->next)
+			continue;
+
+		fprintf(outf, "  %-16s  %s\n", cmd->token, cmd->next->infostr);
+	}
+
+	fprintf(outf, "\nCommands:\n");
+	for (cmd = grp->commands; cmd->token; cmd++) {
+		if (cmd->flags & CMD_HIDDEN)
+			continue;
+
+		if (cmd->next)
+			continue;
+
+		fprintf(outf, "  %-16s  %s\n", cmd->token, cmd->usagestr[1]);
+	}
+
+	fputc('\n', outf);
+	fprintf(stderr, "For an overview of a given command use 'btrfs command --help'\n");
+	fprintf(stderr, "or 'btrfs [command...] --help --full' to print all available options.\n");
+	fprintf(stderr, "Any command name can be shortened as far as it stays unambiguous,\n");
+	fprintf(stderr, "however it is recommended to use full command names in scripts.\n");
+	fprintf(stderr, "All command groups have their manual page named 'btrfs-<group>'.\n");
 }
 
 void usage_command_group(const struct cmd_group *grp, int full, int err)
@@ -183,7 +228,7 @@ void usage_command_group(const struct cmd_group *grp, int full, int err)
 
 void help_unknown_token(const char *arg, const struct cmd_group *grp)
 {
-	fprintf(stderr, "%s: unknown token '%s'\n", argv0_buf, arg);
+	fprintf(stderr, "%s: unknown token '%s'\n", get_argv0_buf(), arg);
 	usage_command_group(grp, 0, 1);
 	exit(1);
 }
@@ -192,7 +237,7 @@ void help_ambiguous_token(const char *arg, const struct cmd_group *grp)
 {
 	const struct cmd_struct *cmd = grp->commands;
 
-	fprintf(stderr, "%s: ambiguous token '%s'\n", argv0_buf, arg);
+	fprintf(stderr, "%s: ambiguous token '%s'\n", get_argv0_buf(), arg);
 	fprintf(stderr, "\nDid you mean one of these ?\n");
 
 	for (; cmd->token; cmd++) {

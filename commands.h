@@ -17,6 +17,11 @@
 #ifndef __BTRFS_COMMANDS_H__
 #define __BTRFS_COMMANDS_H__
 
+enum {
+	CMD_HIDDEN = (1 << 0),	/* should not be in help listings */
+	CMD_ALIAS = (1 << 1),	/* alias of next command in cmd_group */
+};
+
 struct cmd_struct {
 	const char *token;
 	int (*fn)(int, char **);
@@ -47,8 +52,8 @@ struct cmd_struct {
 	/* should be NULL if token is not a subgroup */
 	const struct cmd_group *next;
 
-	/* if true don't list this token in help listings */
-	int hidden;
+	/* CMD_* flags above */
+	int flags;
 };
 
 #define NULL_CMD_STRUCT {NULL, NULL, NULL, NULL, 0}
@@ -72,6 +77,7 @@ extern const char * const generic_cmd_help_usage[];
 void usage(const char * const *usagestr) __attribute__((noreturn));
 void usage_command(const struct cmd_struct *cmd, int full, int err);
 void usage_command_group(const struct cmd_group *grp, int all, int err);
+void usage_command_group_short(const struct cmd_group *grp);
 
 void help_unknown_token(const char *arg, const struct cmd_group *grp) __attribute__((noreturn));
 void help_ambiguous_token(const char *arg, const struct cmd_group *grp) __attribute__((noreturn));

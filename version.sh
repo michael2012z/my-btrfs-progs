@@ -5,8 +5,8 @@
 # Copyright 2008, Aron Griffis <agriffis@n01se.net>
 # Copyright 2008, Oracle
 # Released under the GNU GPLv2
- 
-v="v3.19.1"
+
+v="v4.2.2"
 
 opt=$1
 

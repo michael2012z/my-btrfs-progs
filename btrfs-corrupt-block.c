@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <getopt.h>
+
 #include "kerncompat.h"
 #include "ctree.h"
 #include "volumes.h"
@@ -32,8 +33,8 @@
 
 #define FIELD_BUF_LEN 80
 
-struct extent_buffer *debug_corrupt_block(struct btrfs_root *root, u64 bytenr,
-				     u32 blocksize, u64 copy)
+static struct extent_buffer *debug_corrupt_block(struct btrfs_root *root,
+		u64 bytenr, u32 blocksize, u64 copy)
 {
 	int ret;
 	struct extent_buffer *eb;
@@ -85,7 +86,7 @@ struct extent_buffer *debug_corrupt_block(struct btrfs_root *root, u64 bytenr,
 	return eb;
 }
 
-static void print_usage(void)
+static void print_usage(int ret)
 {
 	fprintf(stderr, "usage: btrfs-corrupt-block [options] device\n");
 	fprintf(stderr, "\t-l Logical extent to be corrupted\n");
@@ -110,7 +111,10 @@ static void print_usage(void)
 	fprintf(stderr, "\t-D Corrupt a dir item, must specify key and field\n");
 	fprintf(stderr, "\t-d Delete this item (must specify -K)\n");
 	fprintf(stderr, "\t-r Operate on this root (only works with -d)\n");
-	exit(1);
+	fprintf(stderr, "\t-C Delete a csum for the specified bytenr.  When "
+		"used with -b it'll delete that many bytes, otherwise it's "
+		"just sectorsize\n");
+	exit(ret);
 }
 
 static void corrupt_keys(struct btrfs_trans_handle *trans,
@@ -295,6 +299,7 @@ static void btrfs_corrupt_extent_tree(struct btrfs_trans_handle *trans,
 
 enum btrfs_inode_field {
 	BTRFS_INODE_FIELD_ISIZE,
+	BTRFS_INODE_FIELD_NBYTES,
 	BTRFS_INODE_FIELD_BAD,
 };
 
@@ -331,6 +336,8 @@ static enum btrfs_inode_field convert_inode_field(char *field)
 {
 	if (!strncmp(field, "isize", FIELD_BUF_LEN))
 		return BTRFS_INODE_FIELD_ISIZE;
+	if (!strncmp(field, "nbytes", FIELD_BUF_LEN))
+		return BTRFS_INODE_FIELD_NBYTES;
 	return BTRFS_INODE_FIELD_BAD;
 }
 
@@ -589,6 +596,11 @@ static int corrupt_inode(struct btrfs_trans_handle *trans,
 		bogus = generate_u64(orig);
 		btrfs_set_inode_size(path->nodes[0], ei, bogus);
 		break;
+	case BTRFS_INODE_FIELD_NBYTES:
+		orig = btrfs_inode_nbytes(path->nodes[0], ei);
+		bogus = generate_u64(orig);
+		btrfs_set_inode_nbytes(path->nodes[0], ei, bogus);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -843,12 +855,32 @@ out:
 	return ret;
 }
 
+static int delete_csum(struct btrfs_root *root, u64 bytenr, u64 bytes)
+{
+	struct btrfs_trans_handle *trans;
+	int ret;
+
+	root = root->fs_info->csum_root;
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		fprintf(stderr, "Couldn't start transaction %ld\n",
+			PTR_ERR(trans));
+		return PTR_ERR(trans);
+	}
+
+	ret = btrfs_del_csums(trans, root, bytenr, bytes);
+	if (ret)
+		fprintf(stderr, "Error deleting csums %d\n", ret);
+	btrfs_commit_transaction(trans, root);
+	return ret;
+}
+
 /* corrupt item using NO cow.
  * Because chunk recover will recover based on whole partition scaning,
  * If using COW, chunk recover will use the old item to recover,
  * which is still OK but we want to check the ability to rebuild chunk
  * not only restore the old ones */
-int corrupt_item_nocow(struct btrfs_trans_handle *trans,
+static int corrupt_item_nocow(struct btrfs_trans_handle *trans,
 		       struct btrfs_root *root, struct btrfs_path *path,
 		       int del)
 {
@@ -881,7 +913,7 @@ int corrupt_item_nocow(struct btrfs_trans_handle *trans,
 	}
 	return ret;
 }
-int corrupt_chunk_tree(struct btrfs_trans_handle *trans,
+static int corrupt_chunk_tree(struct btrfs_trans_handle *trans,
 		       struct btrfs_root *root)
 {
 	int ret;
@@ -954,7 +986,7 @@ free_out:
 	btrfs_free_path(path);
 	return ret;
 }
-int find_chunk_offset(struct btrfs_root *root,
+static int find_chunk_offset(struct btrfs_root *root,
 		      struct btrfs_path *path, u64 offset)
 {
 	struct btrfs_key key;
@@ -978,7 +1010,7 @@ int find_chunk_offset(struct btrfs_root *root,
 		goto out;
 	}
 	if (ret < 0) {
-		fprintf(stderr, "Error searching chunk");
+		fprintf(stderr, "Error searching chunk\n");
 		goto out;
 	}
 out:
@@ -1009,6 +1041,7 @@ int main(int ac, char **av)
 	u64 inode = 0;
 	u64 file_extent = (u64)-1;
 	u64 root_objectid = 0;
+	u64 csum_bytenr = 0;
 	char field[FIELD_BUF_LEN];
 
 	field[0] = '\0';
@@ -1017,31 +1050,32 @@ int main(int ac, char **av)
 
 	while(1) {
 		int c;
-		int option_index = 0;
 		static const struct option long_options[] = {
 			/* { "byte-count", 1, NULL, 'b' }, */
-			{ "logical", 1, NULL, 'l' },
-			{ "copy", 1, NULL, 'c' },
-			{ "bytes", 1, NULL, 'b' },
-			{ "extent-record", 0, NULL, 'e' },
-			{ "extent-tree", 0, NULL, 'E' },
-			{ "keys", 0, NULL, 'k' },
-			{ "chunk-record", 0, NULL, 'u' },
-			{ "chunk-tree", 0, NULL, 'U' },
-			{ "inode", 1, NULL, 'i'},
-			{ "file-extent", 1, NULL, 'x'},
-			{ "metadata-block", 1, NULL, 'm'},
-			{ "field", 1, NULL, 'f'},
-			{ "key", 1, NULL, 'K'},
-			{ "item", 0, NULL, 'I'},
-			{ "dir-item", 0, NULL, 'D'},
-			{ "delete", 0, NULL, 'd'},
-			{ "root", 0, NULL, 'r'},
+			{ "logical", required_argument, NULL, 'l' },
+			{ "copy", required_argument, NULL, 'c' },
+			{ "bytes", required_argument, NULL, 'b' },
+			{ "extent-record", no_argument, NULL, 'e' },
+			{ "extent-tree", no_argument, NULL, 'E' },
+			{ "keys", no_argument, NULL, 'k' },
+			{ "chunk-record", no_argument, NULL, 'u' },
+			{ "chunk-tree", no_argument, NULL, 'U' },
+			{ "inode", required_argument, NULL, 'i'},
+			{ "file-extent", required_argument, NULL, 'x'},
+			{ "metadata-block", required_argument, NULL, 'm'},
+			{ "field", required_argument, NULL, 'f'},
+			{ "key", required_argument, NULL, 'K'},
+			{ "item", no_argument, NULL, 'I'},
+			{ "dir-item", no_argument, NULL, 'D'},
+			{ "delete", no_argument, NULL, 'd'},
+			{ "root", no_argument, NULL, 'r'},
+			{ "csum", required_argument, NULL, 'C'},
+			{ "help", no_argument, NULL, GETOPT_VAL_HELP},
 			{ NULL, 0, NULL, 0 }
 		};
 
-		c = getopt_long(ac, av, "l:c:b:eEkuUi:f:x:m:K:IDdr:",
-				long_options, &option_index);
+		c = getopt_long(ac, av, "l:c:b:eEkuUi:f:x:m:K:IDdr:C:",
+				long_options, NULL);
 		if (c < 0)
 			break;
 		switch(c) {
@@ -1089,7 +1123,7 @@ int main(int ac, char **av)
 				if (ret != 3) {
 					fprintf(stderr, "error reading key "
 						"%d\n", errno);
-					print_usage();
+					print_usage(1);
 				}
 				break;
 			case 'D':
@@ -1104,14 +1138,18 @@ int main(int ac, char **av)
 			case 'r':
 				root_objectid = arg_strtou64(optarg);
 				break;
+			case 'C':
+				csum_bytenr = arg_strtou64(optarg);
+				break;
+			case GETOPT_VAL_HELP:
 			default:
-				print_usage();
+				print_usage(c != GETOPT_VAL_HELP);
 		}
 	}
 	set_argv0(av);
 	ac = ac - optind;
 	if (check_argc_min(ac, 1))
-		print_usage();
+		print_usage(1);
 	dev = av[optind];
 
 	radix_tree_init();
@@ -1126,7 +1164,7 @@ int main(int ac, char **av)
 		struct btrfs_trans_handle *trans;
 
 		if (logical == (u64)-1)
-			print_usage();
+			print_usage(1);
 		trans = btrfs_start_transaction(root, 1);
 		ret = corrupt_extent (trans, root, logical, 0);
 		btrfs_commit_transaction(trans, root);
@@ -1146,7 +1184,7 @@ int main(int ac, char **av)
 		int del;
 
 		if (logical == (u64)-1)
-			print_usage();
+			print_usage(1);
 		del = rand() % 3;
 		path = btrfs_alloc_path();
 		if (!path) {
@@ -1180,7 +1218,7 @@ int main(int ac, char **av)
 		struct btrfs_trans_handle *trans;
 
 		if (!strlen(field))
-			print_usage();
+			print_usage(1);
 
 		trans = btrfs_start_transaction(root, 1);
 		if (file_extent == (u64)-1) {
@@ -1196,26 +1234,30 @@ int main(int ac, char **av)
 	}
 	if (metadata_block) {
 		if (!strlen(field))
-			print_usage();
+			print_usage(1);
 		ret = corrupt_metadata_block(root, metadata_block, field);
 		goto out_close;
 	}
 	if (corrupt_di) {
 		if (!key.objectid || !strlen(field))
-			print_usage();
+			print_usage(1);
 		ret = corrupt_dir_item(root, &key, field);
+		goto out_close;
+	}
+	if (csum_bytenr) {
+		ret = delete_csum(root, csum_bytenr, bytes);
 		goto out_close;
 	}
 	if (corrupt_item) {
 		if (!key.objectid)
-			print_usage();
+			print_usage(1);
 		ret = corrupt_btrfs_item(root, &key, field);
 	}
 	if (delete) {
 		struct btrfs_root *target = root;
 
 		if (!key.objectid)
-			print_usage();
+			print_usage(1);
 		if (root_objectid) {
 			struct btrfs_key root_key;
 
@@ -1227,7 +1269,7 @@ int main(int ac, char **av)
 			if (IS_ERR(target)) {
 				fprintf(stderr, "Couldn't find root %llu\n",
 					(unsigned long long)root_objectid);
-				print_usage();
+				print_usage(1);
 			}
 		}
 		ret = delete_item(target, &key);
@@ -1235,7 +1277,7 @@ int main(int ac, char **av)
 	}
 	if (key.objectid || key.offset || key.type) {
 		if (!strlen(field))
-			print_usage();
+			print_usage(1);
 		ret = corrupt_key(root, &key, field);
 		goto out_close;
 	}
@@ -1244,10 +1286,10 @@ int main(int ac, char **av)
 	 * inode and we're screwed.
 	 */
 	if (file_extent != (u64)-1)
-		print_usage();
+		print_usage(1);
 
 	if (logical == (u64)-1)
-		print_usage();
+		print_usage(1);
 
 	if (bytes == 0)
 		bytes = root->sectorsize;

@@ -37,17 +37,40 @@ static int qgroup_assign(int assign, int argc, char **argv)
 	int ret = 0;
 	int fd;
 	int e;
-	char *path = argv[3];
+	int rescan = 0;
+	char *path;
 	struct btrfs_ioctl_qgroup_assign_args args;
 	DIR *dirstream = NULL;
 
-	if (check_argc_exact(argc, 4))
+	while (1) {
+		enum { GETOPT_VAL_RESCAN = 256 };
+		static const struct option long_options[] = {
+			{ "rescan", no_argument, NULL, GETOPT_VAL_RESCAN },
+			{ NULL, 0, NULL, 0 }
+		};
+		int c = getopt_long(argc, argv, "", long_options, NULL);
+
+		if (c < 0)
+			break;
+		switch (c) {
+		case GETOPT_VAL_RESCAN:
+			rescan = 1;
+			break;
+		default:
+			/* Usage printed by the caller */
+			return -1;
+		}
+	}
+
+	if (check_argc_exact(argc - optind, 3))
 		return -1;
 
 	memset(&args, 0, sizeof(args));
 	args.assign = assign;
-	args.src = parse_qgroupid(argv[1]);
-	args.dst = parse_qgroupid(argv[2]);
+	args.src = parse_qgroupid(argv[optind]);
+	args.dst = parse_qgroupid(argv[optind + 1]);
+
+	path = argv[optind + 2];
 
 	/*
 	 * FIXME src should accept subvol path
@@ -64,13 +87,38 @@ static int qgroup_assign(int assign, int argc, char **argv)
 
 	ret = ioctl(fd, BTRFS_IOC_QGROUP_ASSIGN, &args);
 	e = errno;
-	close_file_or_dir(fd, dirstream);
 	if (ret < 0) {
 		fprintf(stderr, "ERROR: unable to assign quota group: %s\n",
 			strerror(e));
+		close_file_or_dir(fd, dirstream);
 		return 1;
 	}
-	return 0;
+
+	/*
+	 * If ret > 0, it means assign caused qgroup data inconsistent state.
+	 * Schedule a quota rescan if requested.
+	 *
+	 * The return value change only happens in newer kernel. But will not
+	 * cause problem since old kernel has a bug that will never clear
+	 * INCONSISTENT bit.
+	 */
+	if (ret > 0) {
+		if (rescan) {
+			struct btrfs_ioctl_quota_rescan_args args;
+
+			printf("Quota data changed, rescan scheduled\n");
+			memset(&args, 0, sizeof(args));
+			ret = ioctl(fd, BTRFS_IOC_QUOTA_RESCAN, &args);
+			if (ret < 0)
+				fprintf(stderr,
+					"ERROR: quota rescan failed: %s\n",
+					strerror(errno));
+		} else {
+			printf("WARNING: quotas may be inconsistent, rescan needed\n");
+		}
+	}
+	close_file_or_dir(fd, dirstream);
+	return ret;
 }
 
 static int qgroup_create(int create, int argc, char **argv)
@@ -110,12 +158,20 @@ static int parse_limit(const char *p, unsigned long long *s)
 {
 	char *endptr;
 	unsigned long long size;
+	unsigned long long CLEAR_VALUE = -1;
 
 	if (strcasecmp(p, "none") == 0) {
-		*s = 0;
+		*s = CLEAR_VALUE;
 		return 1;
 	}
+
+	if (p[0] == '-')
+		return 0;
+
 	size = strtoull(p, &endptr, 10);
+	if (p == endptr)
+		return 0;
+
 	switch (*endptr) {
 	case 'T':
 	case 't':
@@ -149,8 +205,11 @@ static int parse_limit(const char *p, unsigned long long *s)
 }
 
 static const char * const cmd_qgroup_assign_usage[] = {
-	"btrfs qgroup assign <src> <dst> <path>",
-	"Enable subvolume qgroup support for a filesystem.",
+	"btrfs qgroup assign [options] <src> <dst> <path>",
+	"Assign SRC as the child qgroup of DST",
+	"",
+	"--rescan       schedule qutoa rescan if needed",
+	"--no-rescan    ",
 	NULL
 };
 
@@ -164,7 +223,7 @@ static int cmd_qgroup_assign(int argc, char **argv)
 
 static const char * const cmd_qgroup_remove_usage[] = {
 	"btrfs qgroup remove <src> <dst> <path>",
-	"Remove a subvol from a quota group.",
+	"Remove a child qgroup SRC from DST.",
 	NULL
 };
 
@@ -192,7 +251,7 @@ static int cmd_qgroup_create(int argc, char **argv)
 
 static const char * const cmd_qgroup_destroy_usage[] = {
 	"btrfs qgroup destroy <qgroupid> <path>",
-	"Destroy a subvolume quota group.",
+	"Destroy a quota group.",
 	NULL
 };
 
@@ -216,15 +275,7 @@ static const char * const cmd_qgroup_show_usage[] = {
 	"               (including ancestral qgroups)",
 	"-f             list all qgroups which impact the given path",
 	"               (excluding ancestral qgroups)",
-	"--raw          raw numbers in bytes",
-	"--human-readable",
-	"               human firendly numbers in given base, 1024 by default",
-	"--iec          use 1024 as a base (KiB, MiB, GiB, TiB)",
-	"--si           use 1000 as a base (kB, MB, GB, TB)",
-	"--kbytes       show sizes in KiB, or kB with --si",
-	"--mbytes       show sizes in MiB, or MB with --si",
-	"--gbytes       show sizes in GiB, or GB with --si",
-	"--tbytes       show sizes in TiB, or TB with --si",
+	HELPINFO_OUTPUT_UNIT,
 	"--sort=qgroupid,rfer,excl,max_rfer,max_excl",
 	"               list qgroups sorted by specified items",
 	"               you can use '+' or '-' in front of each item.",
@@ -241,33 +292,24 @@ static int cmd_qgroup_show(int argc, char **argv)
 	DIR *dirstream = NULL;
 	u64 qgroupid;
 	int filter_flag = 0;
-	unsigned unit_mode = UNITS_DEFAULT;
+	unsigned unit_mode;
 
 	struct btrfs_qgroup_comparer_set *comparer_set;
 	struct btrfs_qgroup_filter_set *filter_set;
 	filter_set = btrfs_qgroup_alloc_filter_set();
 	comparer_set = btrfs_qgroup_alloc_comparer_set();
 
+	unit_mode = get_unit_mode_from_arg(&argc, argv, 0);
+
 	optind = 1;
 	while (1) {
 		int c;
-		int option_index = 0;
 		static const struct option long_options[] = {
-			{"sort", 1, NULL, 'S'},
-			{"raw", no_argument, NULL, GETOPT_VAL_RAW},
-			{"kbytes", no_argument, NULL, GETOPT_VAL_KBYTES},
-			{"mbytes", no_argument, NULL, GETOPT_VAL_MBYTES},
-			{"gbytes", no_argument, NULL, GETOPT_VAL_GBYTES},
-			{"tbytes", no_argument, NULL, GETOPT_VAL_TBYTES},
-			{"si", no_argument, NULL, GETOPT_VAL_SI},
-			{"iec", no_argument, NULL, GETOPT_VAL_IEC},
-			{ "human-readable", no_argument, NULL,
-				GETOPT_VAL_HUMAN_READABLE},
+			{"sort", required_argument, NULL, 'S'},
 			{ NULL, 0, NULL, 0 }
 		};
-		c = getopt_long(argc, argv, "pcreFf",
-				long_options, &option_index);
 
+		c = getopt_long(argc, argv, "pcreFf", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -298,30 +340,6 @@ static int cmd_qgroup_show(int argc, char **argv)
 							     &comparer_set);
 			if (ret)
 				usage(cmd_qgroup_show_usage);
-			break;
-		case GETOPT_VAL_RAW:
-			unit_mode = UNITS_RAW;
-			break;
-		case GETOPT_VAL_KBYTES:
-			units_set_base(&unit_mode, UNITS_KBYTES);
-			break;
-		case GETOPT_VAL_MBYTES:
-			units_set_base(&unit_mode, UNITS_MBYTES);
-			break;
-		case GETOPT_VAL_GBYTES:
-			units_set_base(&unit_mode, UNITS_GBYTES);
-			break;
-		case GETOPT_VAL_TBYTES:
-			units_set_base(&unit_mode, UNITS_TBYTES);
-			break;
-		case GETOPT_VAL_SI:
-			units_set_mode(&unit_mode, UNITS_DECIMAL);
-			break;
-		case GETOPT_VAL_IEC:
-			units_set_mode(&unit_mode, UNITS_BINARY);
-			break;
-		case GETOPT_VAL_HUMAN_READABLE:
-			unit_mode = UNITS_HUMAN_BINARY;
 			break;
 		default:
 			usage(cmd_qgroup_show_usage);
@@ -362,7 +380,7 @@ static int cmd_qgroup_show(int argc, char **argv)
 
 static const char * const cmd_qgroup_limit_usage[] = {
 	"btrfs qgroup limit [options] <size>|none [<qgroupid>] <path>",
-	"Limit the size of a subvolume quota group.",
+	"Set the limits a subvolume quota group.",
 	"",
 	"-c   limit amount of data after compression. This is the default,",
 	"     it is currently not possible to turn off this option.",
@@ -408,17 +426,15 @@ static int cmd_qgroup_limit(int argc, char **argv)
 	}
 
 	memset(&args, 0, sizeof(args));
-	if (size) {
-		if (compressed)
-			args.lim.flags |= BTRFS_QGROUP_LIMIT_RFER_CMPR |
-					  BTRFS_QGROUP_LIMIT_EXCL_CMPR;
-		if (exclusive) {
-			args.lim.flags |= BTRFS_QGROUP_LIMIT_MAX_EXCL;
-			args.lim.max_exclusive = size;
-		} else {
-			args.lim.flags |= BTRFS_QGROUP_LIMIT_MAX_RFER;
-			args.lim.max_referenced = size;
-		}
+	if (compressed)
+		args.lim.flags |= BTRFS_QGROUP_LIMIT_RFER_CMPR |
+				  BTRFS_QGROUP_LIMIT_EXCL_CMPR;
+	if (exclusive) {
+		args.lim.flags |= BTRFS_QGROUP_LIMIT_MAX_EXCL;
+		args.lim.max_exclusive = size;
+	} else {
+		args.lim.flags |= BTRFS_QGROUP_LIMIT_MAX_RFER;
+		args.lim.max_referenced = size;
 	}
 
 	if (argc - optind == 2) {
@@ -461,8 +477,11 @@ static int cmd_qgroup_limit(int argc, char **argv)
 	return 0;
 }
 
+static const char qgroup_cmd_group_info[] =
+"manage quota groups";
+
 const struct cmd_group qgroup_cmd_group = {
-	qgroup_cmd_group_usage, NULL, {
+	qgroup_cmd_group_usage, qgroup_cmd_group_info, {
 		{ "assign", cmd_qgroup_assign, cmd_qgroup_assign_usage,
 		   NULL, 0 },
 		{ "remove", cmd_qgroup_remove, cmd_qgroup_remove_usage,

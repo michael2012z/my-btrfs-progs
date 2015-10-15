@@ -4,48 +4,72 @@
 # clean.
 #
 
-here=`pwd`
+unset TOP
+unset LANG
+LANG=C
+SCRIPT_DIR=$(dirname $(readlink -f $0))
+TOP=$(readlink -f $SCRIPT_DIR/../)
+RESULTS="$TOP/tests/convert-tests-results.txt"
+IMAGE="$TOP/tests/test.img"
 
-_fail()
-{
-	echo "$*" | tee -a convert-tests-results.txt
-	exit 1
-}
+source $TOP/tests/common
 
-rm -f convert-tests-results.txt
+rm -f $RESULTS
 
-test(){
-	echo "    [TEST]   $1"
+setup_root_helper
+
+convert_test() {
+	local features
+	local nodesize
+
+	features="$1"
+	shift
+
+	if [ -z "$features" ]; then
+		echo "    [TEST]   $1, btrfs defaults"
+	else
+		echo "    [TEST]   $1, btrfs $features"
+	fi
 	nodesize=$2
 	shift 2
-	echo "creating ext image with: $*" >> convert-tests-results.txt
+	echo "creating ext image with: $*" >> $RESULTS
+	# IMAGE not removed as the file might have special permissions, eg.
+	# when test image is on NFS and would not be writable for root
+	run_check truncate -s 0 $IMAGE
 	# 256MB is the smallest acceptable btrfs image.
-	rm -f $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "could not remove test image file"
-	truncate -s 256M $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "could not create test image file"
-	$* -F $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "filesystem create failed"
-	$here/btrfs-convert -N "$nodesize" $here/test.img \
-			>> convert-tests-results.txt 2>&1 \
-		|| _fail "btrfs-convert failed"
-	$here/btrfs check $here/test.img >> convert-tests-results.txt 2>&1 \
-		|| _fail "btrfs check detected errors"
+	run_check truncate -s 256M $IMAGE
+	run_check $* -F $IMAGE
+
+	# create a file to check btrfs-convert can convert regular file
+	# correct
+	run_check $SUDO_HELPER mount -o loop $IMAGE $TEST_MNT
+	run_check $SUDO_HELPER dd if=/dev/zero of=$TEST_MNT/test bs=$nodesize \
+		count=1 1>/dev/null 2>&1
+	run_check $SUDO_HELPER umount $TEST_MNT
+	run_check $TOP/btrfs-convert ${features:+-O "$features"} -N "$nodesize" $IMAGE
+	run_check $TOP/btrfs check $IMAGE
+	run_check $TOP/btrfs-show-super $IMAGE
 }
 
-# btrfs-convert requires 4k blocksize.
-test "ext2 4k nodesize" 4096 mke2fs -b 4096
-test "ext3 4k nodesize" 4096 mke2fs -j -b 4096
-test "ext4 4k nodesize" 4096 mke2fs -t ext4 -b 4096
-test "ext2 8k nodesize" 8192 mke2fs -b 4096
-test "ext3 8k nodesize" 8192 mke2fs -j -b 4096
-test "ext4 8k nodesize" 8192 mke2fs -t ext4 -b 4096
-test "ext2 16k nodesize" 16384 mke2fs -b 4096
-test "ext3 16k nodesize" 16384 mke2fs -j -b 4096
-test "ext4 16k nodesize" 16384 mke2fs -t ext4 -b 4096
-test "ext2 32k nodesize" 32768 mke2fs -b 4096
-test "ext3 32k nodesize" 32768 mke2fs -j -b 4096
-test "ext4 32k nodesize" 32768 mke2fs -t ext4 -b 4096
-test "ext2 64k nodesize" 65536 mke2fs -b 4096
-test "ext3 64k nodesize" 65536 mke2fs -j -b 4096
-test "ext4 64k nodesize" 65536 mke2fs -t ext4 -b 4096
+if ! [ -z "$TEST" ]; then
+	echo "    [TEST]   skipped all convert tests, TEST=$TEST"
+	exit 0
+fi
+
+for feature in '' 'extref' 'skinny-metadata' 'no-holes'; do
+	convert_test "$feature" "ext2 4k nodesize" 4096 mke2fs -b 4096
+	convert_test "$feature" "ext3 4k nodesize" 4096 mke2fs -j -b 4096
+	convert_test "$feature" "ext4 4k nodesize" 4096 mke2fs -t ext4 -b 4096
+	convert_test "$feature" "ext2 8k nodesize" 8192 mke2fs -b 4096
+	convert_test "$feature" "ext3 8k nodesize" 8192 mke2fs -j -b 4096
+	convert_test "$feature" "ext4 8k nodesize" 8192 mke2fs -t ext4 -b 4096
+	convert_test "$feature" "ext2 16k nodesize" 16384 mke2fs -b 4096
+	convert_test "$feature" "ext3 16k nodesize" 16384 mke2fs -j -b 4096
+	convert_test "$feature" "ext4 16k nodesize" 16384 mke2fs -t ext4 -b 4096
+	convert_test "$feature" "ext2 32k nodesize" 32768 mke2fs -b 4096
+	convert_test "$feature" "ext3 32k nodesize" 32768 mke2fs -j -b 4096
+	convert_test "$feature" "ext4 32k nodesize" 32768 mke2fs -t ext4 -b 4096
+	convert_test "$feature" "ext2 64k nodesize" 65536 mke2fs -b 4096
+	convert_test "$feature" "ext3 64k nodesize" 65536 mke2fs -j -b 4096
+	convert_test "$feature" "ext4 64k nodesize" 65536 mke2fs -t ext4 -b 4096
+done

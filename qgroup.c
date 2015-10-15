@@ -237,10 +237,16 @@ static void print_qgroup_column(struct btrfs_qgroup *qgroup,
 		print_qgroup_column_add_blank(BTRFS_QGROUP_PARENT, len);
 		break;
 	case BTRFS_QGROUP_MAX_RFER:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->max_rfer, unit_mode));
+		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_RFER)
+			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_rfer, unit_mode));
+		else
+			len = printf("%*s", max_len, "none");
 		break;
 	case BTRFS_QGROUP_MAX_EXCL:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->max_excl, unit_mode));
+		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_EXCL)
+			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_excl, unit_mode));
+		else
+			len = printf("%*s", max_len, "none");
 		break;
 	case BTRFS_QGROUP_CHILD:
 		len = print_child_column(qgroup);
@@ -266,7 +272,7 @@ static void print_single_qgroup_table(struct btrfs_qgroup *qgroup)
 	printf("\n");
 }
 
-static void print_table_head()
+static void print_table_head(void)
 {
 	int i;
 	int len;
@@ -459,12 +465,16 @@ int btrfs_qgroup_setup_comparer(struct btrfs_qgroup_comparer_set  **comp_set,
 	BUG_ON(set->ncomps > set->total);
 
 	if (set->ncomps == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_QGROUP_NCOMPS_INCREASE;
 		size = sizeof(*set) +
 		       size * sizeof(struct btrfs_qgroup_comparer);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 
@@ -830,12 +840,16 @@ int btrfs_qgroup_setup_filter(struct btrfs_qgroup_filter_set **filter_set,
 	BUG_ON(set->nfilters > set->total);
 
 	if (set->nfilters == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_QGROUP_NFILTERS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_qgroup_filter);
 
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 		memset(&set->filters[set->total], 0,

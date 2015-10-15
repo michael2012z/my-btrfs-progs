@@ -50,10 +50,8 @@ int task_start(struct task_info *info)
 	ret = pthread_create(&info->id, NULL, info->threadfn,
 			     info->private_data);
 
-	if (ret == 0)
-		pthread_detach(info->id);
-	else
-		info->id = -1;
+	if (ret)
+		info->id = 0;
 
 	return ret;
 }
@@ -63,11 +61,16 @@ void task_stop(struct task_info *info)
 	if (!info)
 		return;
 
-	if (info->periodic.timer_fd)
-		close(info->periodic.timer_fd);
-
-	if (info->id > 0)
+	if (info->id > 0) {
 		pthread_cancel(info->id);
+		pthread_join(info->id, NULL);
+		info->id = 0;
+	}
+
+	if (info->periodic.timer_fd) {
+		close(info->periodic.timer_fd);
+		info->periodic.timer_fd = 0;
+	}
 
 	if (info->postfn)
 		info->postfn(info->private_data);
@@ -91,8 +94,10 @@ int task_period_start(struct task_info *info, unsigned int period_ms)
 		return -1;
 
 	info->periodic.timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
-	if (info->periodic.timer_fd == -1)
+	if (info->periodic.timer_fd == -1) {
+		info->periodic.timer_fd = 0;
 		return info->periodic.timer_fd;
+	}
 
 	info->periodic.wakeups_missed = 0;
 
@@ -130,5 +135,6 @@ void task_period_stop(struct task_info *info)
 	if (info->periodic.timer_fd) {
 		timerfd_settime(info->periodic.timer_fd, 0, NULL, NULL);
 		close(info->periodic.timer_fd);
+		info->periodic.timer_fd = -1;
 	}
 }

@@ -16,6 +16,9 @@
  * Boston, MA 021110-1307, USA.
  */
 
+#include "kerncompat.h"
+#include "androidcompat.h"
+
 #include <stdio.h>
 #include <stdio_ext.h>
 #include <stdlib.h>
@@ -26,7 +29,6 @@
 #include <uuid/uuid.h>
 #include <pthread.h>
 
-#include "kerncompat.h"
 #include "list.h"
 #include "radix-tree.h"
 #include "ctree.h"
@@ -76,6 +78,7 @@ struct device_scan {
 	struct recover_control *rc;
 	struct btrfs_device *dev;
 	int fd;
+	u64 bytenr;
 };
 
 static struct extent_record *btrfs_new_extent_record(struct extent_buffer *eb)
@@ -258,7 +261,7 @@ again:
 		list_del_init(&exist->list);
 		free(exist);
 		/*
-		 * We must do seach again to avoid the following cache.
+		 * We must do search again to avoid the following cache.
 		 * /--old bg 1--//--old bg 2--/
 		 *        /--new bg--/
 		 */
@@ -766,6 +769,8 @@ static int scan_one_device(void *dev_scan_struct)
 
 	bytenr = 0;
 	while (1) {
+		dev_scan->bytenr = bytenr;
+
 		if (is_super_block_address(bytenr))
 			bytenr += rc->sectorsize;
 
@@ -829,12 +834,11 @@ static int scan_devices(struct recover_control *rc)
 	struct btrfs_device *dev;
 	struct device_scan *dev_scans;
 	pthread_t *t_scans;
-	int *t_rets;
+	long *t_rets;
 	int devnr = 0;
 	int devidx = 0;
-	int cancel_from = 0;
-	int cancel_to = 0;
 	int i;
+	int all_done;
 
 	list_for_each_entry(dev, &rc->fs_devices->devices, dev_list)
 		devnr++;
@@ -845,7 +849,7 @@ static int scan_devices(struct recover_control *rc)
 	t_scans = (pthread_t *)malloc(sizeof(pthread_t) * devnr);
 	if (!t_scans)
 		return -ENOMEM;
-	t_rets = (int *)malloc(sizeof(int) * devnr);
+	t_rets = (long *)malloc(sizeof(long) * devnr);
 	if (!t_rets)
 		return -ENOMEM;
 
@@ -860,32 +864,64 @@ static int scan_devices(struct recover_control *rc)
 		dev_scans[devidx].rc = rc;
 		dev_scans[devidx].dev = dev;
 		dev_scans[devidx].fd = fd;
-		ret = pthread_create(&t_scans[devidx], NULL,
-				     (void *)scan_one_device,
-				     (void *)&dev_scans[devidx]);
-		if (ret) {
-			cancel_from = 0;
-			cancel_to = devidx - 1;
-			goto out1;
-		}
+		dev_scans[devidx].bytenr = -1;
 		devidx++;
 	}
 
-	i = 0;
-	while (i < devidx) {
-		ret = pthread_join(t_scans[i], (void **)&t_rets[i]);
-		if (ret || t_rets[i]) {
-			ret = 1;
-			cancel_from = i + 1;
-			cancel_to = devnr - 1;
+	for (i = 0; i < devidx; i++) {
+		ret = pthread_create(&t_scans[i], NULL,
+				     (void *)scan_one_device,
+				     (void *)&dev_scans[i]);
+		if (ret)
 			goto out1;
+
+		dev_scans[i].bytenr = 0;
+	}
+
+	while (1) {
+		all_done = 1;
+		for (i = 0; i < devidx; i++) {
+			if (dev_scans[i].bytenr == -1)
+				continue;
+			ret = pthread_tryjoin_np(t_scans[i],
+						 (void **)&t_rets[i]);
+			if (ret == EBUSY) {
+				all_done = 0;
+				continue;
+			}
+			if (ret || t_rets[i]) {
+				ret = 1;
+				goto out1;
+			}
+			dev_scans[i].bytenr = -1;
 		}
-		i++;
+
+		printf("\rScanning: ");
+		for (i = 0; i < devidx; i++) {
+			if (dev_scans[i].bytenr == -1)
+				printf("%sDONE in dev%d",
+				       i ? ", " : "", i);
+			else
+				printf("%s%llu in dev%d",
+				       i ? ", " : "", dev_scans[i].bytenr, i);
+		}
+		/* clear chars if exist in tail */
+		printf("                ");
+		printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b");
+		fflush(stdout);
+
+		if (all_done) {
+			printf("\n");
+			break;
+		}
+
+		sleep(1);
 	}
 out1:
-	while (ret && (cancel_from <= cancel_to)) {
-		pthread_cancel(t_scans[cancel_from]);
-		cancel_from++;
+	for (i = 0; i < devidx; i++) {
+		if (dev_scans[i].bytenr == -1)
+			continue;
+		pthread_cancel(t_scans[i]);
 	}
 out2:
 	free(dev_scans);
@@ -1058,8 +1094,7 @@ err:
 	return ret;
 }
 
-static int block_group_free_all_extent(struct btrfs_trans_handle *trans,
-				       struct btrfs_root *root,
+static int block_group_free_all_extent(struct btrfs_root *root,
 				       struct block_group_record *bg)
 {
 	struct btrfs_block_group_cache *cache;
@@ -1099,7 +1134,7 @@ static int remove_chunk_extent_item(struct btrfs_trans_handle *trans,
 		if (ret)
 			return ret;
 
-		ret = block_group_free_all_extent(trans, root, chunk->bg_rec);
+		ret = block_group_free_all_extent(root, chunk->bg_rec);
 		if (ret)
 			return ret;
 	}
@@ -2276,7 +2311,7 @@ static void validate_rebuild_chunks(struct recover_control *rc)
 }
 
 /*
- * Return 0 when succesful, < 0 on error and > 0 if aborted by user
+ * Return 0 when successful, < 0 on error and > 0 if aborted by user
  */
 int btrfs_recover_chunk_tree(char *path, int verbose, int yes)
 {

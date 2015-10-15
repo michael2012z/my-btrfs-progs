@@ -5,8 +5,14 @@
 
 _fail()
 {
-	echo "$*" | tee -a $RESULT
+	echo "$*" | tee -a $RESULTS
 	exit 1
+}
+
+# log a message to the results file
+_log()
+{
+	echo "$*" | tee -a $RESULTS
 }
 
 _not_run()
@@ -17,40 +23,90 @@ _not_run()
 
 run_check()
 {
-	echo "############### $@" >> $RESULT 2>&1
-	"$@" >> $RESULT 2>&1 || _fail "failed: $@"
+	echo "############### $@" >> $RESULTS 2>&1
+	"$@" >> $RESULTS 2>&1 || _fail "failed: $@"
+}
+
+# same as run_check but the stderr+stdout output is duplicated on stdout and
+# can be processed further
+run_check_stdout()
+{
+	echo "############### $@" >> $RESULTS 2>&1
+	"$@" 2>&1 | tee -a $RESULTS || _fail "failed: $@"
+}
+
+# same as run_check but does not fail the test, output is logged
+run_mayfail()
+{
+	echo "############### $@" >> $RESULTS 2>&1
+	"$@" >> $RESULTS 2>&1 || _log "failed (ignored): $@"
 }
 
 check_prereq()
 {
-	if ! [ -f $top/$1 ]; then
+	if ! [ -f $TOP/$1 ]; then
 		_fail "Failed prerequisities: $1";
 	fi
 }
 
 check_image()
 {
+	local image
+
 	image=$1
-	echo "testing image $(basename $image)" >> $RESULT
-	$top/btrfs check $image >> $RESULT 2>&1
+	echo "testing image $(basename $image)" >> $RESULTS
+	$TOP/btrfs check $image >> $RESULTS 2>&1
 	[ $? -eq 0 ] && _fail "btrfs check should have detected corruption"
 
-	run_check $top/btrfs check --repair $image
-	run_check $top/btrfs check $image
+	run_check $TOP/btrfs check --repair $image
+	run_check $TOP/btrfs check $image
 }
 
+# Process all image dumps in a given directory,
+# - raw btrfs filesystem images, suffix .raw
+# - dtto compressed by XZ, suffix .raw.xz
+# - meta-dump images with suffix .img
+# - dtto compressed by XZ, suffix .img.xz
 check_all_images()
 {
 	dir=$1
-	for i in $(find $dir -iname '*.img')
+	for image in $(find $dir \( -iname '*.img' -o	\
+				-iname '*.img.xz' -o 	\
+				-iname '*.raw' -o 	\
+				-iname '*.raw.xz' \) | sort)
 	do
-		echo "extracting image $(basename $i)" >> $RESULT
-		$top/btrfs-image -r $i $i.restored || \
-			_fail "failed to extract image $i"
+		cleanme=
+		case "$image" in
+		*.img)
+			rm -f $image.restored
+			: ;;
+		*.img.xz)
+			xz --decompress --keep "$image" || \
+				_fail "failed to decompress image $image"
+			image=${image%%.xz}
+			rm -f $image.restored
+			cleanme=$image
+			;;
+		*.raw)
+			cp --sparse=auto $image $image.restored
+			;;
+		*.raw.xz)
+			xz --decompress --keep "$image" || \
+				_fail "failed to decompress image $image"
+			image=${image%%.xz}
+			mv "$image" "$image".restored
+			;;
+		esac
 
-		check_image $i.restored
+		if ! [ -f $image.restored ]; then
+			echo "restoring image $(basename $image)" >> $RESULTS
+			$TOP/btrfs-image -r $image $image.restored || \
+				_fail "failed to restore image $image"
+		fi
 
-		rm $i.restored
+		check_image $image.restored
+
+		rm -f $image.restored $cleanme
 	done
 }
 
@@ -99,3 +155,52 @@ setup_root_helper()
 	fi
 	SUDO_HELPER=root_helper
 }
+
+prepare_test_dev()
+{
+	# num[K/M/G/T...]
+	local size="$1"
+
+	[[ "$TEST_DEV" ]] && return
+	[[ "$size" ]] || size='1G'
+
+	echo "\$TEST_DEV not given, use $TOP/test/test.img as fallback" >> \
+		$RESULTS
+	TEST_DEV="$TOP/tests/test.img"
+
+	truncate -s "$size" "$TEST_DEV" || _not_run "create file for loop device failed"
+}
+
+run_check_mount_test_dev()
+{
+	setup_root_helper
+
+	local loop_opt
+	if [[ -b "$TEST_DEV" ]]; then
+		loop_opt=""
+	elif [[ -f "$TEST_DEV" ]]; then
+		loop_opt="-o loop"
+	else
+		_fail "Invalid \$TEST_DEV: $TEST_DEV"
+	fi
+
+	[[ -d "$TEST_MNT" ]] || {
+		_fail "Invalid \$TEST_MNT: $TEST_MNT"
+	}
+
+	run_check $SUDO_HELPER mount $loop_opt "$@" "$TEST_DEV" "$TEST_MNT"
+}
+
+run_check_umount_test_dev()
+{
+	setup_root_helper
+	run_check $SUDO_HELPER umount "$@" "$TEST_DEV"
+}
+
+init_env()
+{
+	TEST_MNT="${TEST_MNT:-$TOP/tests/mnt}"
+	export TEST_MNT
+	mkdir -p "$TEST_MNT" || { echo "Failed mkdir -p $TEST_MNT"; exit 1; }
+}
+init_env

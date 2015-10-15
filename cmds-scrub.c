@@ -17,6 +17,7 @@
  */
 
 #include "kerncompat.h"
+#include "androidcompat.h"
 
 #include <sys/ioctl.h>
 #include <sys/wait.h>
@@ -34,6 +35,7 @@
 #include <ctype.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <limits.h>
 
 #include "ctree.h"
 #include "ioctl.h"
@@ -229,6 +231,8 @@ static void _print_scrub_ss(struct scrub_stats *ss)
 {
 	char t[4096];
 	struct tm tm;
+	time_t seconds;
+	unsigned hours;
 
 	if (!ss || !ss->t_start) {
 		printf("\tno stats available\n");
@@ -245,19 +249,20 @@ static void _print_scrub_ss(struct scrub_stats *ss)
 		t[sizeof(t) - 1] = '\0';
 		printf("\tscrub started at %s", t);
 	}
-	if (ss->finished && !ss->canceled) {
-		printf(" and finished after %llu seconds\n",
-		       ss->duration);
-	} else if (ss->canceled) {
-		printf(" and was aborted after %llu seconds\n",
-		       ss->duration);
-	} else {
-		if (ss->in_progress)
-			printf(", running for %llu seconds\n", ss->duration);
-		else
-			printf(", interrupted after %llu seconds, not running\n",
-					ss->duration);
-	}
+
+	seconds = ss->duration;
+	hours = ss->duration / (60 * 60);
+	gmtime_r(&seconds, &tm);
+	strftime(t, sizeof(t), "%M:%S", &tm);
+	if (ss->in_progress)
+		printf(", running for %02u:%s\n", hours, t);
+	else if (ss->canceled)
+		printf(" and was aborted after %02u:%s\n", hours, t);
+	else if (ss->finished)
+		printf(" and finished after %02u:%s\n", hours, t);
+	else
+		printf(", interrupted after %02u:%s, not running\n",
+		       hours, t);
 }
 
 static void print_scrub_dev(struct btrfs_ioctl_dev_info_args *di,
@@ -385,7 +390,7 @@ static int scrub_open_file(const char *datafile, int m)
 static int scrub_open_file_r(const char *fn_base, const char *fn_local)
 {
 	int ret;
-	char datafile[BTRFS_PATH_NAME_MAX + 1];
+	char datafile[PATH_MAX];
 	ret = scrub_datafile(fn_base, fn_local, NULL,
 				datafile, sizeof(datafile));
 	if (ret < 0)
@@ -397,7 +402,7 @@ static int scrub_open_file_w(const char *fn_base, const char *fn_local,
 				const char *tmp)
 {
 	int ret;
-	char datafile[BTRFS_PATH_NAME_MAX + 1];
+	char datafile[PATH_MAX];
 	ret = scrub_datafile(fn_base, fn_local, tmp,
 				datafile, sizeof(datafile));
 	if (ret < 0)
@@ -409,8 +414,8 @@ static int scrub_rename_file(const char *fn_base, const char *fn_local,
 				const char *tmp)
 {
 	int ret;
-	char datafile_old[BTRFS_PATH_NAME_MAX + 1];
-	char datafile_new[BTRFS_PATH_NAME_MAX + 1];
+	char datafile_old[PATH_MAX];
+	char datafile_new[PATH_MAX];
 	ret = scrub_datafile(fn_base, fn_local, tmp,
 				datafile_old, sizeof(datafile_old));
 	if (ret < 0)
@@ -496,12 +501,16 @@ again:
 		}
 		return p;
 	}
-	if (avail == -1)
+	if (avail == -1) {
+		free_history(p);
 		return ERR_PTR(-errno);
+	}
 	avail += old_avail;
 
 	i = 0;
 	while (i < avail) {
+		void *tmp;
+
 		switch (state) {
 		case 0: /* start of file */
 			ret = scrub_kvread(&i,
@@ -528,11 +537,17 @@ again:
 				continue;
 			}
 			++curr;
+			tmp = p;
 			p = realloc(p, (curr + 2) * sizeof(*p));
-			if (p)
-				p[curr] = malloc(sizeof(**p));
-			if (!p || !p[curr])
+			if (!p) {
+				free_history(tmp);
 				return ERR_PTR(-errno);
+			}
+			p[curr] = malloc(sizeof(**p));
+			if (!p[curr]) {
+				free_history(p);
+				return ERR_PTR(-errno);
+			}
 			memset(p[curr], 0, sizeof(**p));
 			p[curr + 1] = NULL;
 			++state;
@@ -1123,7 +1138,7 @@ static int scrub_start(int argc, char **argv, int resume)
 	struct scrub_file_record *last_scrub = NULL;
 	char *datafile = strdup(SCRUB_DATA_FILE);
 	char fsid[BTRFS_UUID_UNPARSED_SIZE];
-	char sock_path[BTRFS_PATH_NAME_MAX + 1] = "";
+	char sock_path[PATH_MAX] = "";
 	struct scrub_progress_cycle spc;
 	pthread_mutex_t spc_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 	void *terr;
@@ -1799,8 +1814,11 @@ out:
 	return !!err;
 }
 
+static const char scrub_cmd_group_info[] =
+"verify checksums of data and metadata";
+
 const struct cmd_group scrub_cmd_group = {
-	scrub_cmd_group_usage, NULL, {
+	scrub_cmd_group_usage, scrub_cmd_group_info, {
 		{ "start", cmd_scrub_start, cmd_scrub_start_usage, NULL, 0 },
 		{ "cancel", cmd_scrub_cancel, cmd_scrub_cancel_usage, NULL, 0 },
 		{ "resume", cmd_scrub_resume, cmd_scrub_resume_usage, NULL, 0 },

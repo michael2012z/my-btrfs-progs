@@ -107,7 +107,8 @@ static int io_ctl_prepare_pages(struct io_ctl *io_ctl, struct btrfs_root *root,
 
 	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
 	if (ret) {
-		printf("Couldn't find file extent item for free space inode"
+		fprintf(stderr,
+		       "Couldn't find file extent item for free space inode"
 		       " %Lu\n", ino);
 		btrfs_release_path(path);
 		return -EINVAL;
@@ -138,7 +139,7 @@ static int io_ctl_prepare_pages(struct io_ctl *io_ctl, struct btrfs_root *root,
 				    struct btrfs_file_extent_item);
 		if (btrfs_file_extent_type(path->nodes[0], fi) !=
 		    BTRFS_FILE_EXTENT_REG) {
-			printf("Not the file extent type we wanted\n");
+			fprintf(stderr, "Not the file extent type we wanted\n");
 			ret = -EINVAL;
 			break;
 		}
@@ -307,7 +308,7 @@ static int __load_free_space_cache(struct btrfs_root *root,
 
 	ret = btrfs_search_slot(NULL, root, &inode_location, path, 0, 0);
 	if (ret) {
-		printf("Couldn't find free space inode %d\n", ret);
+		fprintf(stderr, "Couldn't find free space inode %d\n", ret);
 		return 0;
 	}
 
@@ -322,7 +323,8 @@ static int __load_free_space_cache(struct btrfs_root *root,
 	}
 
 	if (btrfs_inode_generation(leaf, inode_item) != generation) {
-		printf("free space inode generation (%llu) did not match "
+		fprintf(stderr,
+		       "free space inode generation (%llu) did not match "
 		       "free space cache generation (%llu)\n",
 		       (unsigned long long)btrfs_inode_generation(leaf,
 								  inode_item),
@@ -372,7 +374,8 @@ static int __load_free_space_cache(struct btrfs_root *root,
 		if (type == BTRFS_FREE_SPACE_EXTENT) {
 			ret = link_free_space(ctl, e);
 			if (ret) {
-				printf("Duplicate entries in free space cache, dumping");
+				fprintf(stderr,
+				       "Duplicate entries in free space cache\n");
 				free(e);
 				goto free_cache;
 			}
@@ -387,7 +390,8 @@ static int __load_free_space_cache(struct btrfs_root *root,
 			ret = link_free_space(ctl, e);
 			ctl->total_bitmaps++;
 			if (ret) {
-				printf("Duplicate entries in free space cache, dumping");
+				fprintf(stderr,
+				       "Duplicate entries in free space cache\n");
 				free(e->bitmap);
 				free(e);
 				goto free_cache;
@@ -428,7 +432,9 @@ int load_free_space_cache(struct btrfs_fs_info *fs_info,
 {
 	struct btrfs_free_space_ctl *ctl = block_group->free_space_ctl;
 	struct btrfs_path *path;
+	u64 used = btrfs_block_group_used(&block_group->item);
 	int ret = 0;
+	int matched;
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -438,11 +444,22 @@ int load_free_space_cache(struct btrfs_fs_info *fs_info,
 				      block_group->key.objectid);
 	btrfs_free_path(path);
 
+	matched = (ctl->free_space == (block_group->key.offset - used -
+				       block_group->bytes_super));
+	if (ret == 1 && !matched) {
+		__btrfs_remove_free_space_cache(ctl);
+		fprintf(stderr,
+		       "block group %llu has wrong amount of free space\n",
+		       block_group->key.objectid);
+		ret = -1;
+	}
+
 	if (ret < 0) {
 		ret = 0;
 
-		printf("failed to load free space cache for block group %llu\n",
-			block_group->key.objectid);
+		fprintf(stderr,
+		       "failed to load free space cache for block group %llu\n",
+		       block_group->key.objectid);
 	}
 
 	return ret;

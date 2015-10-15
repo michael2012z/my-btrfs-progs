@@ -19,12 +19,15 @@
 #ifndef __BTRFS_IOCTL_H__
 #define __BTRFS_IOCTL_H__
 
-#include <asm/types.h>
-#include <linux/ioctl.h>
-#include <time.h>
-
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+#include <asm/types.h>
+#include <linux/ioctl.h>
+
+#ifndef __user
+#define __user
 #endif
 
 #define BTRFS_IOCTL_MAGIC 0x94
@@ -42,6 +45,8 @@ struct btrfs_ioctl_vol_args {
 #define BTRFS_SUBVOL_CREATE_ASYNC	(1ULL << 0)
 #define BTRFS_SUBVOL_RDONLY		(1ULL << 1)
 #define BTRFS_SUBVOL_QGROUP_INHERIT	(1ULL << 2)
+#define BTRFS_FSID_SIZE 16
+#define BTRFS_UUID_SIZE 16
 
 #define BTRFS_QGROUP_INHERIT_SET_LIMITS	(1ULL << 0)
 
@@ -68,7 +73,6 @@ struct btrfs_ioctl_qgroup_limit_args {
 };
 
 #define BTRFS_SUBVOL_NAME_MAX 4039
-
 struct btrfs_ioctl_vol_args_v2 {
 	__s64 fd;
 	__u64 transid;
@@ -76,32 +80,48 @@ struct btrfs_ioctl_vol_args_v2 {
 	union {
 		struct {
 			__u64 size;
-			struct btrfs_qgroup_inherit *qgroup_inherit;
+			struct btrfs_qgroup_inherit __user *qgroup_inherit;
 		};
 		__u64 unused[4];
 	};
 	char name[BTRFS_SUBVOL_NAME_MAX + 1];
 };
 
-#define BTRFS_FSID_SIZE 16
-#define BTRFS_UUID_SIZE 16
-
+/*
+ * structure to report errors and progress to userspace, either as a
+ * result of a finished scrub, a canceled scrub or a progress inquiry
+ */
 struct btrfs_scrub_progress {
-	__u64 data_extents_scrubbed;
-	__u64 tree_extents_scrubbed;
-	__u64 data_bytes_scrubbed;
-	__u64 tree_bytes_scrubbed;
-	__u64 read_errors;
-	__u64 csum_errors;
-	__u64 verify_errors;
-	__u64 no_csum;
-	__u64 csum_discards;
-	__u64 super_errors;
-	__u64 malloc_errors;
-	__u64 uncorrectable_errors;
-	__u64 corrected_errors;
-	__u64 last_physical;
-	__u64 unverified_errors;
+	__u64 data_extents_scrubbed;	/* # of data extents scrubbed */
+	__u64 tree_extents_scrubbed;	/* # of tree extents scrubbed */
+	__u64 data_bytes_scrubbed;	/* # of data bytes scrubbed */
+	__u64 tree_bytes_scrubbed;	/* # of tree bytes scrubbed */
+	__u64 read_errors;		/* # of read errors encountered (EIO) */
+	__u64 csum_errors;		/* # of failed csum checks */
+	__u64 verify_errors;		/* # of occurences, where the metadata
+					 * of a tree block did not match the
+					 * expected values, like generation or
+					 * logical */
+	__u64 no_csum;			/* # of 4k data block for which no csum
+					 * is present, probably the result of
+					 * data written with nodatasum */
+	__u64 csum_discards;		/* # of csum for which no data was found
+					 * in the extent tree. */
+	__u64 super_errors;		/* # of bad super blocks encountered */
+	__u64 malloc_errors;		/* # of internal kmalloc errors. These
+					 * will likely cause an incomplete
+					 * scrub */
+	__u64 uncorrectable_errors;	/* # of errors where either no intact
+					 * copy was found or the writeback
+					 * failed */
+	__u64 corrected_errors;		/* # of errors corrected */
+	__u64 last_physical;		/* last physical address scrubbed. In
+					 * case a scrub was aborted, this can
+					 * be used to restart the scrub */
+	__u64 unverified_errors;	/* # of occurences where a read for a
+					 * full (64k) bio failed, but the re-
+					 * check succeeded for each 4k piece.
+					 * Intermittent error. */
 };
 
 #define BTRFS_SCRUB_READONLY	1
@@ -172,7 +192,17 @@ struct btrfs_ioctl_fs_info_args {
 	__u64 max_id;				/* out */
 	__u64 num_devices;			/* out */
 	__u8 fsid[BTRFS_FSID_SIZE];		/* out */
-	__u64 reserved[124];			/* pad to 1k */
+	__u32 nodesize;				/* out */
+	__u32 sectorsize;			/* out */
+	__u32 clone_alignment;			/* out */
+	__u32 reserved32;
+	__u64 reserved[122];			/* pad to 1k */
+};
+
+struct btrfs_ioctl_feature_flags {
+	__u64 compat_flags;
+	__u64 compat_ro_flags;
+	__u64 incompat_flags;
 };
 
 /* balance control ioctl modes */
@@ -197,15 +227,16 @@ struct btrfs_balance_args {
 
 	__u64 flags;
 
-	__u64 limit;
-
+	__u64 limit;		/* limit number of processed chunks */
 	__u64 unused[7];
 } __attribute__ ((__packed__));
 
+/* report balance progress to userspace */
 struct btrfs_balance_progress {
-	__u64 expected;
-	__u64 considered;
-	__u64 completed;
+	__u64 expected;		/* estimated # of chunks that will be
+				 * relocated to fulfill the request */
+	__u64 considered;	/* # of chunks we have considered so far */
+	__u64 completed;	/* # of chunks relocated so far */
 };
 
 #define BTRFS_BALANCE_STATE_RUNNING	(1ULL << 0)
@@ -223,6 +254,13 @@ struct btrfs_ioctl_balance_args {
 	struct btrfs_balance_progress stat;	/* out */
 
 	__u64 unused[72];			/* pad to 1k */
+};
+
+#define BTRFS_INO_LOOKUP_PATH_MAX 4080
+struct btrfs_ioctl_ino_lookup_args {
+	__u64 treeid;
+	__u64 objectid;
+	char name[BTRFS_INO_LOOKUP_PATH_MAX];
 };
 
 struct btrfs_ioctl_search_key {
@@ -292,16 +330,41 @@ struct btrfs_ioctl_search_args_v2 {
         __u64 buf[0];                      /* out - found items */
 };
 
-#define BTRFS_INO_LOOKUP_PATH_MAX 4080
-struct btrfs_ioctl_ino_lookup_args {
-	__u64 treeid;
-	__u64 objectid;
-	char name[BTRFS_INO_LOOKUP_PATH_MAX];
+/* With a @src_length of zero, the range from @src_offset->EOF is cloned! */
+struct btrfs_ioctl_clone_range_args {
+	__s64 src_fd;
+	__u64 src_offset, src_length;
+	__u64 dest_offset;
 };
 
 /* flags for the defrag range ioctl */
 #define BTRFS_DEFRAG_RANGE_COMPRESS 1
 #define BTRFS_DEFRAG_RANGE_START_IO 2
+
+#define BTRFS_SAME_DATA_DIFFERS	1
+/* For extent-same ioctl */
+struct btrfs_ioctl_same_extent_info {
+	__s64 fd;		/* in - destination file */
+	__u64 logical_offset;	/* in - start of extent in destination */
+	__u64 bytes_deduped;	/* out - total # of bytes we were able
+				 * to dedupe from this file */
+	/* status of this dedupe operation:
+	 * 0 if dedup succeeds
+	 * < 0 for error
+	 * == BTRFS_SAME_DATA_DIFFERS if data differs
+	 */
+	__s32 status;		/* out - see above description */
+	__u32 reserved;
+};
+
+struct btrfs_ioctl_same_args {
+	__u64 logical_offset;	/* in - start of extent in source */
+	__u64 length;		/* in - length of extent */
+	__u16 dest_count;	/* in - total elements in info array */
+	__u16 reserved1;
+	__u32 reserved2;
+	struct btrfs_ioctl_same_extent_info info[0];
+};
 
 struct btrfs_ioctl_defrag_range_args {
 	/* start of the defrag operation */
@@ -370,50 +433,6 @@ struct btrfs_ioctl_logical_ino_args {
 	__u64				inodes;
 };
 
-struct btrfs_ioctl_timespec {
-	__u64 sec;
-	__u32 nsec;
-};
-
-struct btrfs_ioctl_received_subvol_args {
-	char	uuid[BTRFS_UUID_SIZE];	/* in */
-	__u64	stransid;		/* in */
-	__u64	rtransid;		/* out */
-	struct btrfs_ioctl_timespec stime; /* in */
-	struct btrfs_ioctl_timespec rtime; /* out */
-	__u64	flags;			/* in */
-	__u64	reserved[16];		/* in */
-};
-
-/*
- * Caller doesn't want file data in the send stream, even if the
- * search of clone sources doesn't find an extent. UPDATE_EXTENT
- * commands will be sent instead of WRITE commands.
- */
-#define BTRFS_SEND_FLAG_NO_FILE_DATA		0x1
-
-/*
- * Do not add the leading stream header. Used when multiple snapshots
- * are sent back to back.
- */
-#define BTRFS_SEND_FLAG_OMIT_STREAM_HEADER	0x2
-
-/*
- * Omit the command at the end of the stream that indicated the end
- * of the stream. This option is used when multiple snapshots are
- * sent back to back.
- */
-#define BTRFS_SEND_FLAG_OMIT_END_CMD		0x4
-
-struct btrfs_ioctl_send_args {
-	__s64 send_fd;			/* in */
-	__u64 clone_sources_count;	/* in */
-	__u64 *clone_sources;		/* in */
-	__u64 parent_root;		/* in */
-	__u64 flags;			/* in */
-	__u64 reserved[4];		/* in */
-};
-
 enum btrfs_dev_stat_values {
 	/* disk I/O failure stats */
 	BTRFS_DEV_STAT_WRITE_ERRS, /* EIO or EREMOTEIO from lower layers */
@@ -472,6 +491,54 @@ struct btrfs_ioctl_qgroup_create_args {
 	__u64 create;
 	__u64 qgroupid;
 };
+struct btrfs_ioctl_timespec {
+	__u64 sec;
+	__u32 nsec;
+};
+
+struct btrfs_ioctl_received_subvol_args {
+	char	uuid[BTRFS_UUID_SIZE];	/* in */
+	__u64	stransid;		/* in */
+	__u64	rtransid;		/* out */
+	struct btrfs_ioctl_timespec stime; /* in */
+	struct btrfs_ioctl_timespec rtime; /* out */
+	__u64	flags;			/* in */
+	__u64	reserved[16];		/* in */
+};
+
+/*
+ * Caller doesn't want file data in the send stream, even if the
+ * search of clone sources doesn't find an extent. UPDATE_EXTENT
+ * commands will be sent instead of WRITE commands.
+ */
+#define BTRFS_SEND_FLAG_NO_FILE_DATA		0x1
+
+/*
+ * Do not add the leading stream header. Used when multiple snapshots
+ * are sent back to back.
+ */
+#define BTRFS_SEND_FLAG_OMIT_STREAM_HEADER	0x2
+
+/*
+ * Omit the command at the end of the stream that indicated the end
+ * of the stream. This option is used when multiple snapshots are
+ * sent back to back.
+ */
+#define BTRFS_SEND_FLAG_OMIT_END_CMD		0x4
+
+#define BTRFS_SEND_FLAG_MASK \
+	(BTRFS_SEND_FLAG_NO_FILE_DATA | \
+	 BTRFS_SEND_FLAG_OMIT_STREAM_HEADER | \
+	 BTRFS_SEND_FLAG_OMIT_END_CMD)
+
+struct btrfs_ioctl_send_args {
+	__s64 send_fd;			/* in */
+	__u64 clone_sources_count;	/* in */
+	__u64 __user *clone_sources;	/* in */
+	__u64 parent_root;		/* in */
+	__u64 flags;			/* in */
+	__u64 reserved[4];		/* in */
+};
 
 /* Error codes as returned by the kernel */
 enum btrfs_err_code {
@@ -522,14 +589,6 @@ static inline char *btrfs_err_str(enum btrfs_err_code err_code)
 				   struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_SCAN_DEV _IOW(BTRFS_IOCTL_MAGIC, 4, \
 				   struct btrfs_ioctl_vol_args)
-
-/* With a @src_length of zero, the range from @src_offset->EOF is cloned! */
-struct btrfs_ioctl_clone_range_args {
-	__s64 src_fd;
-	__u64 src_offset, src_length;
-	__u64 dest_offset;
-};
-
 /* trans start and trans end are dangerous, and only for
  * use by applications that know how to avoid the
  * resulting deadlocks
@@ -545,8 +604,10 @@ struct btrfs_ioctl_clone_range_args {
 				   struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_BALANCE _IOW(BTRFS_IOCTL_MAGIC, 12, \
 				   struct btrfs_ioctl_vol_args)
+
 #define BTRFS_IOC_CLONE_RANGE _IOW(BTRFS_IOCTL_MAGIC, 13, \
 				   struct btrfs_ioctl_clone_range_args)
+
 #define BTRFS_IOC_SUBVOL_CREATE _IOW(BTRFS_IOCTL_MAGIC, 14, \
 				   struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_SNAP_DESTROY _IOW(BTRFS_IOCTL_MAGIC, 15, \
@@ -588,12 +649,11 @@ struct btrfs_ioctl_clone_range_args {
 					struct btrfs_ioctl_ino_path_args)
 #define BTRFS_IOC_LOGICAL_INO _IOWR(BTRFS_IOCTL_MAGIC, 36, \
 					struct btrfs_ioctl_ino_path_args)
-#define BTRFS_IOC_DEVICES_READY _IOR(BTRFS_IOCTL_MAGIC, 39, \
-				     struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_SET_RECEIVED_SUBVOL _IOWR(BTRFS_IOCTL_MAGIC, 37, \
 				struct btrfs_ioctl_received_subvol_args)
 #define BTRFS_IOC_SEND _IOW(BTRFS_IOCTL_MAGIC, 38, struct btrfs_ioctl_send_args)
-
+#define BTRFS_IOC_DEVICES_READY _IOR(BTRFS_IOCTL_MAGIC, 39, \
+				     struct btrfs_ioctl_vol_args)
 #define BTRFS_IOC_QUOTA_CTL _IOWR(BTRFS_IOCTL_MAGIC, 40, \
 					struct btrfs_ioctl_quota_ctl_args)
 #define BTRFS_IOC_QGROUP_ASSIGN _IOW(BTRFS_IOCTL_MAGIC, 41, \
@@ -615,6 +675,8 @@ struct btrfs_ioctl_clone_range_args {
 				      struct btrfs_ioctl_get_dev_stats)
 #define BTRFS_IOC_DEV_REPLACE _IOWR(BTRFS_IOCTL_MAGIC, 53, \
 				    struct btrfs_ioctl_dev_replace_args)
+#define BTRFS_IOC_FILE_EXTENT_SAME _IOWR(BTRFS_IOCTL_MAGIC, 54, \
+					 struct btrfs_ioctl_same_args)
 #define BTRFS_IOC_GET_FEATURES _IOR(BTRFS_IOCTL_MAGIC, 57, \
                                   struct btrfs_ioctl_feature_flags)
 #define BTRFS_IOC_SET_FEATURES _IOW(BTRFS_IOCTL_MAGIC, 57, \

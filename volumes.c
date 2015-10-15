@@ -198,6 +198,17 @@ again:
 	return 0;
 }
 
+void btrfs_close_all_devices(void)
+{
+	struct btrfs_fs_devices *fs_devices;
+
+	while (!list_empty(&fs_uuids)) {
+		fs_devices = list_entry(fs_uuids.next, struct btrfs_fs_devices,
+					list);
+		btrfs_close_devices(fs_devices);
+	}
+}
+
 int btrfs_open_devices(struct btrfs_fs_devices *fs_devices, int flags)
 {
 	int fd;
@@ -1510,7 +1521,8 @@ struct btrfs_device *btrfs_find_device(struct btrfs_root *root, u64 devid,
 	cur_devices = root->fs_info->fs_devices;
 	while (cur_devices) {
 		if (!fsid ||
-		    !memcmp(cur_devices->fsid, fsid, BTRFS_UUID_SIZE)) {
+		    (!memcmp(cur_devices->fsid, fsid, BTRFS_UUID_SIZE) ||
+		     root->fs_info->ignore_fsid_mismatch)) {
 			device = __find_device(&cur_devices->devices,
 					       devid, uuid);
 			if (device)
@@ -1575,9 +1587,14 @@ static struct btrfs_device *fill_missing_device(u64 devid)
 	return device;
 }
 
+/*
+ * Slot is used to verfy the chunk item is valid
+ *
+ * For sys chunk in superblock, pass -1 to indicate sys chunk.
+ */
 static int read_one_chunk(struct btrfs_root *root, struct btrfs_key *key,
 			  struct extent_buffer *leaf,
-			  struct btrfs_chunk *chunk)
+			  struct btrfs_chunk *chunk, int slot)
 {
 	struct btrfs_mapping_tree *map_tree = &root->fs_info->mapping_tree;
 	struct map_lookup *map;
@@ -1615,6 +1632,50 @@ static int read_one_chunk(struct btrfs_root *root, struct btrfs_key *key,
 	map->type = btrfs_chunk_type(leaf, chunk);
 	map->sub_stripes = btrfs_chunk_sub_stripes(leaf, chunk);
 
+	/* Check on chunk item type */
+	if (map->type & ~(BTRFS_BLOCK_GROUP_TYPE_MASK |
+			  BTRFS_BLOCK_GROUP_PROFILE_MASK)) {
+		fprintf(stderr, "Unknown chunk type bits: %llu\n",
+			map->type & ~(BTRFS_BLOCK_GROUP_TYPE_MASK |
+				      BTRFS_BLOCK_GROUP_PROFILE_MASK));
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
+	 * Btrfs_chunk contains at least one stripe, and for sys_chunk
+	 * it can't exceed the system chunk array size
+	 * For normal chunk, it should match its chunk item size.
+	 */
+	if (num_stripes < 1 ||
+	    (slot == -1 && sizeof(struct btrfs_stripe) * num_stripes >
+	     BTRFS_SYSTEM_CHUNK_ARRAY_SIZE) ||
+	    (slot >= 0 && sizeof(struct btrfs_stripe) * (num_stripes - 1) >
+	     btrfs_item_size_nr(leaf, slot))) {
+		fprintf(stderr, "Invalid num_stripes: %u\n",
+		        num_stripes);
+		ret = -EIO;
+		goto out;
+	}
+
+	/*
+	 * Device number check against profile
+	 */
+	if ((map->type & BTRFS_BLOCK_GROUP_RAID10 && map->sub_stripes == 0) ||
+	    (map->type & BTRFS_BLOCK_GROUP_RAID1 && num_stripes < 1) ||
+	    (map->type & BTRFS_BLOCK_GROUP_RAID5 && num_stripes < 2) ||
+	    (map->type & BTRFS_BLOCK_GROUP_RAID6 && num_stripes < 3) ||
+	    (map->type & BTRFS_BLOCK_GROUP_DUP && num_stripes > 2) ||
+	    ((map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK) == 0 &&
+	     num_stripes != 1)) {
+		fprintf(stderr,
+			"Invalid num_stripes:sub_stripes %u:%u for profile %llu\n",
+		        num_stripes, map->sub_stripes,
+			map->type & BTRFS_BLOCK_GROUP_PROFILE_MASK);
+		ret = -EIO;
+		goto out;
+	}
+
 	for (i = 0; i < num_stripes; i++) {
 		map->stripes[i].physical =
 			btrfs_stripe_offset_nr(leaf, chunk, i);
@@ -1635,6 +1696,9 @@ static int read_one_chunk(struct btrfs_root *root, struct btrfs_key *key,
 	BUG_ON(ret);
 
 	return 0;
+out:
+	free(map);
+	return ret;
 }
 
 static int fill_device_from_item(struct extent_buffer *leaf,
@@ -1773,7 +1837,7 @@ int btrfs_read_sys_array(struct btrfs_root *root)
 
 		if (key.type == BTRFS_CHUNK_ITEM_KEY) {
 			chunk = (struct btrfs_chunk *)(ptr - (u8 *)super_copy);
-			ret = read_one_chunk(root, &key, sb, chunk);
+			ret = read_one_chunk(root, &key, sb, chunk, -1);
 			if (ret)
 				break;
 			num_stripes = btrfs_chunk_num_stripes(sb, chunk);
@@ -1835,7 +1899,8 @@ int btrfs_read_chunk_tree(struct btrfs_root *root)
 		} else if (found_key.type == BTRFS_CHUNK_ITEM_KEY) {
 			struct btrfs_chunk *chunk;
 			chunk = btrfs_item_ptr(leaf, slot, struct btrfs_chunk);
-			ret = read_one_chunk(root, &found_key, leaf, chunk);
+			ret = read_one_chunk(root, &found_key, leaf, chunk,
+					     slot);
 			BUG_ON(ret);
 		}
 		path->slots[0]++;

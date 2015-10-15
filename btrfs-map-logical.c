@@ -30,72 +30,164 @@
 #include "list.h"
 #include "utils.h"
 
+#define BUFFER_SIZE (64 * 1024)
+
 /* we write the mirror info to stdout unless they are dumping the data
  * to stdout
  * */
 static FILE *info_file;
 
-static struct extent_buffer * debug_read_block(struct btrfs_root *root,
-		u64 bytenr, u32 blocksize, u64 copy)
+static int map_one_extent(struct btrfs_fs_info *fs_info,
+			  u64 *logical_ret, u64 *len_ret, int search_foward)
 {
-	int ret;
-	struct extent_buffer *eb;
-	u64 length;
+	struct btrfs_path *path;
+	struct btrfs_key key;
+	u64 logical;
+	u64 len = 0;
+	int ret = 0;
+
+	BUG_ON(!logical_ret);
+	logical = *logical_ret;
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	key.objectid = logical;
+	key.type = 0;
+	key.offset = 0;
+
+	ret = btrfs_search_slot(NULL, fs_info->extent_root, &key, path,
+				0, 0);
+	if (ret < 0)
+		goto out;
+	BUG_ON(ret == 0);
+	ret = 0;
+
+again:
+	btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
+	if ((search_foward && key.objectid < logical) ||
+	    (!search_foward && key.objectid > logical) ||
+	    (key.type != BTRFS_EXTENT_ITEM_KEY &&
+	     key.type != BTRFS_METADATA_ITEM_KEY)) {
+		if (!search_foward)
+			ret = btrfs_previous_extent_item(fs_info->extent_root,
+							 path, 0);
+		else
+			ret = btrfs_next_item(fs_info->extent_root, path);
+		if (ret)
+			goto out;
+		goto again;
+	}
+	logical = key.objectid;
+	if (key.type == BTRFS_METADATA_ITEM_KEY)
+		len = fs_info->tree_root->leafsize;
+	else
+		len = key.offset;
+
+out:
+	btrfs_free_path(path);
+	if (!ret) {
+		*logical_ret = logical;
+		if (len_ret)
+			*len_ret = len;
+	}
+	return ret;
+}
+
+static int __print_mapping_info(struct btrfs_fs_info *fs_info, u64 logical,
+				u64 len, int mirror_num)
+{
 	struct btrfs_multi_bio *multi = NULL;
-	struct btrfs_device *device;
-	int num_copies;
-	int mirror_num = 1;
+	u64 cur_offset = 0;
+	u64 cur_len;
+	int ret = 0;
 
-	eb = btrfs_find_create_tree_block(root, bytenr, blocksize);
-	if (!eb)
-		return NULL;
+	while (cur_offset < len) {
+		struct btrfs_device *device;
+		int i;
 
-	length = blocksize;
-	while (1) {
-		ret = btrfs_map_block(&root->fs_info->mapping_tree, READ,
-				      eb->start, &length, &multi,
-				      mirror_num, NULL);
+		cur_len = len - cur_offset;
+		ret = btrfs_map_block(&fs_info->mapping_tree, READ,
+				logical + cur_offset, &cur_len,
+				&multi, mirror_num, NULL);
 		if (ret) {
 			fprintf(info_file,
 				"Error: fails to map mirror%d logical %llu: %s\n",
-				mirror_num, (unsigned long long)eb->start,
-				strerror(-ret));
-			free_extent_buffer(eb);
-			return NULL;
+				mirror_num, logical, strerror(-ret));
+			return ret;
 		}
-		device = multi->stripes[0].dev;
-		eb->fd = device->fd;
-		device->total_ios++;
-		eb->dev_bytenr = multi->stripes[0].physical;
-
-		fprintf(info_file, "mirror %d logical %Lu physical %Lu "
-			"device %s\n", mirror_num, (unsigned long long)bytenr,
-			(unsigned long long)eb->dev_bytenr, device->name);
+		for (i = 0; i < multi->num_stripes; i++) {
+			device = multi->stripes[i].dev;
+			fprintf(info_file,
+				"mirror %d logical %Lu physical %Lu device %s\n",
+				mirror_num, logical + cur_offset,
+				multi->stripes[0].physical,
+				device->name);
+		}
 		kfree(multi);
-
-		if (!copy || mirror_num == copy) {
-			ret = read_extent_from_disk(eb, 0, eb->len);
-			if (ret) {
-				fprintf(info_file,
-					"Error: failed to read extent: mirror %d logical %llu: %s\n",
-					mirror_num, (unsigned long long)eb->start,
-					strerror(-ret));
-				free_extent_buffer(eb);
-				eb = NULL;
-				break;
-			}
-		}
-
-		num_copies = btrfs_num_copies(&root->fs_info->mapping_tree,
-					      eb->start, eb->len);
-		if (num_copies == 1)
-			break;
-
-		mirror_num++;
-		if (mirror_num > num_copies)
-			break;
+		multi = NULL;
+		cur_offset += cur_len;
 	}
-	return eb;
+	return ret;
+}
+
+/*
+ * Logical and len is the exact value of a extent.
+ * And offset is the offset inside the extent. It's only used for case
+ * where user only want to print part of the extent.
+ *
+ * Caller *MUST* ensure the range [logical,logical+len) are in one extent.
+ * Or we can encounter the following case, causing a -ENOENT error:
+ * |<-----given parameter------>|
+ *		|<------ Extent A ----->|
+ */
+static int print_mapping_info(struct btrfs_fs_info *fs_info, u64 logical,
+			      u64 len)
+{
+	int num_copies;
+	int mirror_num;
+	int ret = 0;
+
+	num_copies = btrfs_num_copies(&fs_info->mapping_tree, logical, len);
+	for (mirror_num = 1; mirror_num <= num_copies; mirror_num++) {
+		ret = __print_mapping_info(fs_info, logical, len, mirror_num);
+		if (ret < 0)
+			return ret;
+	}
+	return ret;
+}
+
+/* Same requisition as print_mapping_info function */
+static int write_extent_content(struct btrfs_fs_info *fs_info, int out_fd,
+				u64 logical, u64 length, int mirror)
+{
+	char buffer[BUFFER_SIZE];
+	u64 cur_offset = 0;
+	u64 cur_len;
+	int ret = 0;
+
+	while (cur_offset < length) {
+		cur_len = min_t(u64, length - cur_offset, BUFFER_SIZE);
+		ret = read_extent_data(fs_info->tree_root, buffer,
+				       logical + cur_offset, &cur_len, mirror);
+		if (ret < 0) {
+			fprintf(stderr,
+				"Failed to read extent at [%llu, %llu]: %s\n",
+				logical, logical + length, strerror(-ret));
+			return ret;
+		}
+		ret = write(out_fd, buffer, cur_len);
+		if (ret < 0 || ret != cur_len) {
+			if (ret > 0)
+				ret = -EINTR;
+			fprintf(stderr, "output file write failed: %s\n",
+				strerror(-ret));
+			return ret;
+		}
+		cur_offset += cur_len;
+	}
+	return ret;
 }
 
 static void print_usage(void) __attribute__((noreturn));
@@ -113,29 +205,29 @@ int main(int ac, char **av)
 {
 	struct cache_tree root_cache;
 	struct btrfs_root *root;
-	struct extent_buffer *eb;
 	char *dev;
 	char *output_file = NULL;
-	u64 logical = 0;
-	int ret = 0;
 	u64 copy = 0;
+	u64 logical = 0;
 	u64 bytes = 0;
-	int out_fd = 0;
+	u64 cur_logical = 0;
+	u64 cur_len = 0;
+	int out_fd = -1;
+	int found = 0;
+	int ret = 0;
 
 	while(1) {
 		int c;
-		int option_index = 0;
 		static const struct option long_options[] = {
 			/* { "byte-count", 1, NULL, 'b' }, */
-			{ "logical", 1, NULL, 'l' },
-			{ "copy", 1, NULL, 'c' },
-			{ "output", 1, NULL, 'o' },
-			{ "bytes", 1, NULL, 'b' },
+			{ "logical", required_argument, NULL, 'l' },
+			{ "copy", required_argument, NULL, 'c' },
+			{ "output", required_argument, NULL, 'o' },
+			{ "bytes", required_argument, NULL, 'b' },
 			{ NULL, 0, NULL, 0}
 		};
 
-		c = getopt_long(ac, av, "l:c:o:b:", long_options,
-				&option_index);
+		c = getopt_long(ac, av, "l:c:o:b:", long_options, NULL);
 		if (c < 0)
 			break;
 		switch(c) {
@@ -170,6 +262,7 @@ int main(int ac, char **av)
 	root = open_ctree(dev, 0, 0);
 	if (!root) {
 		fprintf(stderr, "Open ctree failed\n");
+		free(output_file);
 		exit(1);
 	}
 
@@ -193,30 +286,78 @@ int main(int ac, char **av)
 	}
 
 	if (bytes == 0)
-		bytes = root->sectorsize;
+		bytes = root->nodesize;
+	cur_logical = logical;
+	cur_len = bytes;
 
-	bytes = (bytes + root->sectorsize - 1) / root->sectorsize;
-	bytes *= root->sectorsize;
-
-	while (bytes > 0) {
-		eb = debug_read_block(root, logical, root->sectorsize, copy);
-		if (eb && output_file) {
-			ret = write(out_fd, eb->data, eb->len);
-			if (ret < 0 || ret != eb->len) {
-				ret = 1;
-				fprintf(stderr, "output file write failed\n");
-				goto out_close_fd;
-			}
+	/* First find the nearest extent */
+	ret = map_one_extent(root->fs_info, &cur_logical, &cur_len, 0);
+	if (ret < 0) {
+		fprintf(stderr, "Failed to find extent at [%llu,%llu): %s\n",
+			cur_logical, cur_logical + cur_len, strerror(-ret));
+		goto out_close_fd;
+	}
+	/*
+	 * Normally, search backward should be OK, but for special case like
+	 * given logical is quite small where no extents are before it,
+	 * we need to search forward.
+	 */
+	if (ret > 0) {
+		ret = map_one_extent(root->fs_info, &cur_logical, &cur_len, 1);
+		if (ret < 0) {
+			fprintf(stderr,
+				"Failed to find extent at [%llu,%llu): %s\n",
+				cur_logical, cur_logical + cur_len,
+				strerror(-ret));
+			goto out_close_fd;
 		}
-		free_extent_buffer(eb);
-		logical += root->sectorsize;
-		bytes -= root->sectorsize;
+		if (ret > 0) {
+			fprintf(stderr,
+				"Failed to find any extent at [%llu,%llu)\n",
+				cur_logical, cur_logical + cur_len);
+			goto out_close_fd;
+		}
 	}
 
+	while (cur_logical + cur_len >= logical && cur_logical < logical +
+	       bytes) {
+		u64 real_logical;
+		u64 real_len;
+
+		found = 1;
+		ret = map_one_extent(root->fs_info, &cur_logical, &cur_len, 1);
+		if (ret < 0)
+			goto out_close_fd;
+		if (ret > 0)
+			break;
+		real_logical = max(logical, cur_logical);
+		real_len = min(logical + bytes, cur_logical + cur_len) -
+			   real_logical;
+
+		ret = print_mapping_info(root->fs_info, real_logical, real_len);
+		if (ret < 0)
+			goto out_close_fd;
+		if (output_file && out_fd != -1) {
+			ret = write_extent_content(root->fs_info, out_fd,
+					real_logical, real_len, copy);
+			if (ret < 0)
+				goto out_close_fd;
+		}
+
+		cur_logical += cur_len;
+	}
+
+	if (!found) {
+		fprintf(stderr, "No extent found at range [%llu,%llu)\n",
+			logical, logical + bytes);
+	}
 out_close_fd:
 	if (output_file && out_fd != 1)
 		close(out_fd);
 close:
+	free(output_file);
 	close_ctree(root);
+	if (ret < 0)
+		ret = 1;
 	return ret;
 }

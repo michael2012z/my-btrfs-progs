@@ -305,7 +305,30 @@ struct readable_flag_entry incompat_flags_array[] = {
 static const int incompat_flags_num = sizeof(incompat_flags_array) /
 				      sizeof(struct readable_flag_entry);
 
-static void print_readable_incompat_flag(u64 flag)
+#define DEF_HEADER_FLAG_ENTRY(bit_name)			\
+	{BTRFS_HEADER_FLAG_##bit_name, #bit_name}
+#define DEF_SUPER_FLAG_ENTRY(bit_name)			\
+	{BTRFS_SUPER_FLAG_##bit_name, #bit_name}
+
+struct readable_flag_entry super_flags_array[] = {
+	DEF_HEADER_FLAG_ENTRY(WRITTEN),
+	DEF_HEADER_FLAG_ENTRY(RELOC),
+	DEF_SUPER_FLAG_ENTRY(CHANGING_FSID),
+	DEF_SUPER_FLAG_ENTRY(SEEDING),
+	DEF_SUPER_FLAG_ENTRY(METADUMP),
+	DEF_SUPER_FLAG_ENTRY(METADUMP_V2)
+};
+static const int super_flags_num = ARRAY_SIZE(super_flags_array);
+
+#define BTRFS_SUPER_FLAG_SUPP	(BTRFS_HEADER_FLAG_WRITTEN |\
+				 BTRFS_HEADER_FLAG_RELOC |\
+				 BTRFS_SUPER_FLAG_CHANGING_FSID |\
+				 BTRFS_SUPER_FLAG_SEEDING |\
+				 BTRFS_SUPER_FLAG_METADUMP |\
+				 BTRFS_SUPER_FLAG_METADUMP_V2)
+
+static void __print_readable_flag(u64 flag, struct readable_flag_entry *array,
+				  int array_size, u64 supported_flags)
 {
 	int i;
 	int first = 1;
@@ -313,9 +336,10 @@ static void print_readable_incompat_flag(u64 flag)
 
 	if (!flag)
 		return;
+
 	printf("\t\t\t( ");
-	for (i = 0; i < incompat_flags_num; i++) {
-		entry = incompat_flags_array + i;
+	for (i = 0; i < array_size; i++) {
+		entry = array + i;
 		if (flag & entry->bit) {
 			if (first)
 				printf("%s ", entry->output);
@@ -324,7 +348,7 @@ static void print_readable_incompat_flag(u64 flag)
 			first = 0;
 		}
 	}
-	flag &= ~BTRFS_FEATURE_INCOMPAT_SUPP;
+	flag &= ~supported_flags;
 	if (flag) {
 		if (first)
 			printf("unknown flag: 0x%llx ", flag);
@@ -332,6 +356,19 @@ static void print_readable_incompat_flag(u64 flag)
 			printf("|\n\t\t\t  unknown flag: 0x%llx ", flag);
 	}
 	printf(")\n");
+}
+
+static void print_readable_incompat_flag(u64 flag)
+{
+	return __print_readable_flag(flag, incompat_flags_array,
+				     incompat_flags_num,
+				     BTRFS_FEATURE_INCOMPAT_SUPP);
+}
+
+static void print_readable_super_flag(u64 flag)
+{
+	return __print_readable_flag(flag, super_flags_array,
+				     super_flags_num, BTRFS_SUPER_FLAG_SUPP);
 }
 
 static void dump_superblock(struct btrfs_super_block *sb, int full)
@@ -353,6 +390,7 @@ static void dump_superblock(struct btrfs_super_block *sb, int full)
 		(unsigned long long)btrfs_super_bytenr(sb));
 	printf("flags\t\t\t0x%llx\n",
 		(unsigned long long)btrfs_super_flags(sb));
+	print_readable_super_flag(btrfs_super_flags(sb));
 
 	printf("magic\t\t\t");
 	s = (char *) &sb->magic;

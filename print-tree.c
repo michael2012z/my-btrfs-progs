@@ -224,9 +224,11 @@ void print_chunk(struct extent_buffer *eb, struct btrfs_chunk *chunk)
 	char chunk_flags_str[32] = {0};
 
 	bg_flags_to_str(btrfs_chunk_type(eb, chunk), chunk_flags_str);
-	printf("\t\tchunk length %llu owner %llu type %s num_stripes %d\n",
+	printf("\t\tchunk length %llu owner %llu stripe_len %llu\n",
 	       (unsigned long long)btrfs_chunk_length(eb, chunk),
 	       (unsigned long long)btrfs_chunk_owner(eb, chunk),
+	       (unsigned long long)btrfs_chunk_stripe_len(eb, chunk));
+	printf("\t\ttype %s num_stripes %d\n",
 	       chunk_flags_str, num_stripes);
 	for (i = 0 ; i < num_stripes ; i++) {
 		printf("\t\t\tstripe %d devid %llu offset %llu\n", i,
@@ -621,31 +623,31 @@ static void print_key_type(u64 objectid, u8 type)
 		printf("BALANCE_ITEM");
 		break;
 	case BTRFS_DEV_REPLACE_KEY:
-		printf("DEV_REPLACE_ITEM");
+		printf("DEV_REPLACE");
 		break;
 	case BTRFS_STRING_ITEM_KEY:
 		printf("STRING_ITEM");
 		break;
 	case BTRFS_QGROUP_STATUS_KEY:
-		printf("BTRFS_STATUS_KEY");
+		printf("QGROUP_STATUS");
 		break;
 	case BTRFS_QGROUP_RELATION_KEY:
-		printf("BTRFS_QGROUP_RELATION_KEY");
+		printf("QGROUP_RELATION");
 		break;
 	case BTRFS_QGROUP_INFO_KEY:
-		printf("BTRFS_QGROUP_INFO_KEY");
+		printf("QGROUP_INFO");
 		break;
 	case BTRFS_QGROUP_LIMIT_KEY:
-		printf("BTRFS_QGROUP_LIMIT_KEY");
+		printf("QGROUP_LIMIT");
 		break;
 	case BTRFS_DEV_STATS_KEY:
-		printf("DEV_STATS_ITEM");
+		printf("DEV_STATS");
 		break;
 	case BTRFS_UUID_KEY_SUBVOL:
-		printf("BTRFS_UUID_KEY_SUBVOL");
+		printf("UUID_KEY_SUBVOL");
 		break;
 	case BTRFS_UUID_KEY_RECEIVED_SUBVOL:
-		printf("BTRFS_UUID_KEY_RECEIVED_SUBVOL");
+		printf("UUID_KEY_RECEIVED_SUBVOL");
 		break;
 	default:
 		printf("UNKNOWN.%d", type);
@@ -843,10 +845,13 @@ void btrfs_print_leaf(struct btrfs_root *root, struct extent_buffer *l)
 		switch (type) {
 		case BTRFS_INODE_ITEM_KEY:
 			ii = btrfs_item_ptr(l, i, struct btrfs_inode_item);
-			printf("\t\tinode generation %llu transid %llu size %llu block group %llu mode %o links %u uid %u gid %u rdev %llu flags 0x%llx\n",
+			printf("\t\tinode generation %llu transid %llu size %llu nbytes %llu\n"
+			       "\t\tblock group %llu mode %o links %u uid %u gid %u\n"
+			       "\t\trdev %llu flags 0x%llx\n",
 			       (unsigned long long)btrfs_inode_generation(l, ii),
 			       (unsigned long long)btrfs_inode_transid(l, ii),
 			       (unsigned long long)btrfs_inode_size(l, ii),
+			       (unsigned long long)btrfs_inode_nbytes(l, ii),
 			       (unsigned long long)btrfs_inode_block_group(l,ii),
 			       btrfs_inode_mode(l, ii),
 			       btrfs_inode_nlink(l, ii),
