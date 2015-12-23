@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include "kerncompat.h"
 #include "ctree.h"
+#include "volumes.h"
 #include "disk-io.h"
 #include "print-tree.h"
 #include "transaction.h"
@@ -101,5 +102,7 @@ int main(int ac, char **av)
 	 */
 	printf("using SB copy %llu, bytenr %llu\n", (unsigned long long)num,
 	       (unsigned long long)bytenr);
+	close_ctree(root);
+	btrfs_close_all_devices();
 	return ret;
 }

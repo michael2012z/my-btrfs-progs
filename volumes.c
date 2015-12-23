@@ -252,21 +252,14 @@ int btrfs_scan_one_device(int fd, const char *path,
 			  u64 *total_devs, u64 super_offset, int super_recover)
 {
 	struct btrfs_super_block *disk_super;
-	char *buf;
+	char buf[BTRFS_SUPER_INFO_SIZE];
 	int ret;
 	u64 devid;
 
-	buf = malloc(4096);
-	if (!buf) {
-		ret = -ENOMEM;
-		goto error;
-	}
 	disk_super = (struct btrfs_super_block *)buf;
 	ret = btrfs_read_dev_super(fd, disk_super, super_offset, super_recover);
-	if (ret < 0) {
-		ret = -EIO;
-		goto error_brelse;
-	}
+	if (ret < 0)
+		return -EIO;
 	devid = btrfs_stack_device_id(&disk_super->dev_item);
 	if (btrfs_super_flags(disk_super) & BTRFS_SUPER_FLAG_METADUMP)
 		*total_devs = 1;
@@ -275,9 +268,6 @@ int btrfs_scan_one_device(int fd, const char *path,
 
 	ret = device_list_add(path, disk_super, devid, fs_devices_ret);
 
-error_brelse:
-	free(buf);
-error:
 	return ret;
 }
 
@@ -1175,8 +1165,8 @@ int btrfs_num_copies(struct btrfs_mapping_tree *map_tree, u64 logical, u64 len)
 	return ret;
 }
 
-int btrfs_next_metadata(struct btrfs_mapping_tree *map_tree, u64 *logical,
-			u64 *size)
+int btrfs_next_bg(struct btrfs_mapping_tree *map_tree, u64 *logical,
+		     u64 *size, u64 type)
 {
 	struct cache_extent *ce;
 	struct map_lookup *map;
@@ -1189,7 +1179,7 @@ int btrfs_next_metadata(struct btrfs_mapping_tree *map_tree, u64 *logical,
 			return -ENOENT;
 
 		map = container_of(ce, struct map_lookup, ce);
-		if (map->type & BTRFS_BLOCK_GROUP_METADATA) {
+		if (map->type & type) {
 			*logical = ce->start;
 			*size = ce->size;
 			return 0;
@@ -1968,10 +1958,9 @@ static void split_eb_for_raid56(struct btrfs_fs_info *info,
 		if (raid_map[i] >= BTRFS_RAID5_P_STRIPE)
 			break;
 
-		eb = malloc(sizeof(struct extent_buffer) + stripe_len);
+		eb = calloc(1, sizeof(struct extent_buffer) + stripe_len);
 		if (!eb)
 			BUG();
-		memset(eb, 0, sizeof(struct extent_buffer) + stripe_len);
 
 		eb->start = raid_map[i];
 		eb->len = stripe_len;

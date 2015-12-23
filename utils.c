@@ -182,7 +182,7 @@ int test_uuid_unique(char *fs_uuid)
 int make_btrfs(int fd, struct btrfs_mkfs_config *cfg)
 {
 	struct btrfs_super_block super;
-	struct extent_buffer *buf = NULL;
+	struct extent_buffer *buf;
 	struct btrfs_root_item root_item;
 	struct btrfs_disk_key disk_key;
 	struct btrfs_extent_item *extent_item;
@@ -203,6 +203,10 @@ int make_btrfs(int fd, struct btrfs_mkfs_config *cfg)
 	int skinny_metadata = !!(cfg->features &
 				 BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA);
 	u64 num_bytes;
+
+	buf = malloc(sizeof(*buf) + max(cfg->sectorsize, cfg->nodesize));
+	if (!buf)
+		return -ENOMEM;
 
 	first_free = BTRFS_SUPER_INFO_OFFSET + cfg->sectorsize * 2 - 1;
 	first_free &= ~((u64)cfg->sectorsize - 1);
@@ -248,8 +252,6 @@ int make_btrfs(int fd, struct btrfs_mkfs_config *cfg)
 	btrfs_set_super_incompat_flags(&super, cfg->features);
 	if (cfg->label)
 		strncpy(super.label, cfg->label, BTRFS_LABEL_SIZE - 1);
-
-	buf = malloc(sizeof(*buf) + max(cfg->sectorsize, cfg->nodesize));
 
 	/* create the tree of root objects */
 	memset(buf->data, 0, cfg->nodesize);
@@ -724,7 +726,7 @@ static int zero_dev_clamped(int fd, off_t start, ssize_t len, u64 dev_size)
 
 int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 		      struct btrfs_root *root, int fd, char *path,
-		      u64 block_count, u32 io_width, u32 io_align,
+		      u64 device_total_bytes, u32 io_width, u32 io_align,
 		      u32 sectorsize)
 {
 	struct btrfs_super_block *disk_super;
@@ -732,9 +734,11 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	struct btrfs_device *device;
 	struct btrfs_dev_item *dev_item;
 	char *buf = NULL;
-	u64 total_bytes;
+	u64 fs_total_bytes;
 	u64 num_devs;
 	int ret;
+
+	device_total_bytes = (device_total_bytes / sectorsize) * sectorsize;
 
 	device = kzalloc(sizeof(*device), GFP_NOFS);
 	if (!device)
@@ -755,7 +759,7 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	device->sector_size = sectorsize;
 	device->fd = fd;
 	device->writeable = 1;
-	device->total_bytes = block_count;
+	device->total_bytes = device_total_bytes;
 	device->bytes_used = 0;
 	device->total_ios = 0;
 	device->dev_root = root->fs_info->dev_root;
@@ -763,11 +767,12 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	if (!device->name)
 		goto err_nomem;
 
+	INIT_LIST_HEAD(&device->dev_list);
 	ret = btrfs_add_device(trans, root, device);
 	BUG_ON(ret);
 
-	total_bytes = btrfs_super_total_bytes(super) + block_count;
-	btrfs_set_super_total_bytes(super, total_bytes);
+	fs_total_bytes = btrfs_super_total_bytes(super) + device_total_bytes;
+	btrfs_set_super_total_bytes(super, fs_total_bytes);
 
 	num_devs = btrfs_super_num_devices(super) + 1;
 	btrfs_set_super_num_devices(super, num_devs);
@@ -847,7 +852,7 @@ out:
 }
 
 int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
-			   u64 max_block_count, int *mixed, int discard)
+			   u64 max_block_count, int discard)
 {
 	u64 block_count;
 	struct stat st;
@@ -866,9 +871,6 @@ int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
 	}
 	if (max_block_count)
 		block_count = min(block_count, max_block_count);
-
-	if (block_count < BTRFS_MKFS_SMALL_VOLUME_SIZE && !(*mixed))
-		*mixed = 1;
 
 	if (discard) {
 		/*
@@ -1081,27 +1083,28 @@ out:
  *
  * On error, return -1, errno should be set.
  */
-int open_path_or_dev_mnt(const char *path, DIR **dirstream)
+int open_path_or_dev_mnt(const char *path, DIR **dirstream, int verbose)
 {
 	char mp[PATH_MAX];
-	int fdmnt;
+	int ret;
 
-	fdmnt = is_block_device(path);
-	if (fdmnt == 1) {
-		int ret;
-
+	if (is_block_device(path)) {
 		ret = get_btrfs_mount(path, mp, sizeof(mp));
 		if (ret < 0) {
 			/* not a mounted btrfs dev */
+			error_on(verbose, "'%s' is not a mounted btrfs device",
+				 path);
 			errno = EINVAL;
 			return -1;
 		}
-		fdmnt = open_file_or_dir(mp, dirstream);
-	} else if (fdmnt == 0) {
-		fdmnt = open_file_or_dir(path, dirstream);
+		ret = open_file_or_dir(mp, dirstream);
+		error_on(verbose && ret < 0, "can't access '%s': %s",
+			 path, strerror(errno));
+	} else {
+		ret = btrfs_open_dir(path, dirstream, 1);
 	}
 
-	return fdmnt;
+	return ret;
 }
 
 /*
@@ -1169,6 +1172,34 @@ static int is_loop_device (const char* device) {
 		MAJOR(statbuf.st_rdev) == LOOP_MAJOR);
 }
 
+/*
+ * Takes a loop device path (e.g. /dev/loop0) and returns
+ * the associated file (e.g. /images/my_btrfs.img) using
+ * loopdev API
+ */
+static int resolve_loop_device_with_loopdev(const char* loop_dev, char* loop_file)
+{
+	int fd;
+	int ret;
+	struct loop_info64 lo64;
+
+	fd = open(loop_dev, O_RDONLY | O_NONBLOCK);
+	if (fd < 0)
+		return -errno;
+	ret = ioctl(fd, LOOP_GET_STATUS64, &lo64);
+	if (ret < 0) {
+		ret = -errno;
+		goto out;
+	}
+
+	memcpy(loop_file, lo64.lo_file_name, sizeof(lo64.lo_file_name));
+	loop_file[sizeof(lo64.lo_file_name)] = 0;
+
+out:
+	close(fd);
+
+	return ret;
+}
 
 /* Takes a loop device path (e.g. /dev/loop0) and returns
  * the associated file (e.g. /images/my_btrfs.img) */
@@ -1184,8 +1215,15 @@ static int resolve_loop_device(const char* loop_dev, char* loop_file,
 	if (!realpath(loop_dev, real_loop_dev))
 		return -errno;
 	snprintf(p, PATH_MAX, "/sys/block/%s/loop/backing_file", strrchr(real_loop_dev, '/'));
-	if (!(f = fopen(p, "r")))
+	if (!(f = fopen(p, "r"))) {
+		if (errno == ENOENT)
+			/*
+			 * It's possibly a partitioned loop device, which is
+			 * resolvable with loopdev API.
+			 */
+			return resolve_loop_device_with_loopdev(loop_dev, loop_file);
 		return -errno;
+	}
 
 	snprintf(fmt, 20, "%%%i[^\n]", max_len-1);
 	ret = fscanf(f, fmt, loop_file);
@@ -1515,7 +1553,7 @@ int btrfs_register_all_devices(void)
 
 	list_for_each_entry(fs_devices, all_uuids, list) {
 		list_for_each_entry(device, &fs_devices->devices, dev_list) {
-			if (strlen(device->name) != 0) {
+			if (*device->name) {
 				err = btrfs_register_one_device(device->name);
 				if (err < 0)
 					return err;
@@ -3075,4 +3113,15 @@ unsigned int get_unit_mode_from_arg(int *argc, char *argv[], int df_mode)
 	*argc = arg_end;
 
 	return unit_mode;
+}
+
+int string_is_numerical(const char *str)
+{
+	if (!(*str >= '0' && *str <= '9'))
+		return 0;
+	while (*str >= '0' && *str <= '9')
+		str++;
+	if (*str != '\0')
+		return 0;
+	return 1;
 }

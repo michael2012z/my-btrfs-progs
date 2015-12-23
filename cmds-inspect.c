@@ -42,15 +42,11 @@ static int __ino_to_path_fd(u64 inum, int fd, int verbose, const char *prepend)
 	int ret;
 	int i;
 	struct btrfs_ioctl_ino_path_args ipa;
-	struct btrfs_data_container *fspath;
-
-	fspath = malloc(4096);
-	if (!fspath)
-		return -ENOMEM;
+	struct btrfs_data_container fspath[PATH_MAX];
 
 	memset(fspath, 0, sizeof(*fspath));
 	ipa.inum = inum;
-	ipa.size = 4096;
+	ipa.size = PATH_MAX;
 	ipa.fspath = ptr_to_u64(fspath);
 
 	ret = ioctl(fd, BTRFS_IOC_INO_PATHS, &ipa);
@@ -79,7 +75,6 @@ static int __ino_to_path_fd(u64 inum, int fd, int verbose, const char *prepend)
 	}
 
 out:
-	free(fspath);
 	return !!ret;
 }
 
@@ -116,11 +111,9 @@ static int cmd_inspect_inode_resolve(int argc, char **argv)
 	if (check_argc_exact(argc - optind, 2))
 		usage(cmd_inspect_inode_resolve_usage);
 
-	fd = open_file_or_dir(argv[optind+1], &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[optind+1]);
+	fd = btrfs_open_dir(argv[optind + 1], &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = __ino_to_path_fd(arg_strtou64(argv[optind]), fd, verbose,
 			       argv[optind+1]);
@@ -189,9 +182,8 @@ static int cmd_inspect_logical_resolve(int argc, char **argv)
 	loi.size = size;
 	loi.inodes = ptr_to_u64(inodes);
 
-	fd = open_file_or_dir(argv[optind+1], &dirstream);
+	fd = btrfs_open_dir(argv[optind + 1], &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[optind+1]);
 		ret = 12;
 		goto out;
 	}
@@ -239,10 +231,9 @@ static int cmd_inspect_logical_resolve(int argc, char **argv)
 						name);
 				BUG_ON(ret >= bytes_left);
 				free(name);
-				path_fd = open_file_or_dir(full_path, &dirs);
+				path_fd = btrfs_open_dir(full_path, &dirs, 1);
 				if (path_fd < 0) {
-					fprintf(stderr, "ERROR: can't access "
-						"'%s'\n", full_path);
+					ret = -ENOENT;
 					goto out;
 				}
 			}
@@ -278,9 +269,8 @@ static int cmd_inspect_subvolid_resolve(int argc, char **argv)
 	if (check_argc_exact(argc, 3))
 		usage(cmd_inspect_subvolid_resolve_usage);
 
-	fd = open_file_or_dir(argv[2], &dirstream);
+	fd = btrfs_open_dir(argv[2], &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[2]);
 		ret = -ENOENT;
 		goto out;
 	}
@@ -319,9 +309,8 @@ static int cmd_inspect_rootid(int argc, char **argv)
 	if (check_argc_exact(argc, 2))
 		usage(cmd_inspect_rootid_usage);
 
-	fd = open_file_or_dir(argv[1], &dirstream);
+	fd = btrfs_open_dir(argv[1], &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[1]);
 		ret = -ENOENT;
 		goto out;
 	}
@@ -618,17 +607,15 @@ static int cmd_inspect_min_dev_size(int argc, char **argv)
 	if (check_argc_exact(argc - optind, 1))
 		usage(cmd_inspect_min_dev_size_usage);
 
-	fd = open_file_or_dir(argv[optind], &dirstream);
+	fd = btrfs_open_dir(argv[optind], &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[optind]);
 		ret = -ENOENT;
 		goto out;
 	}
 
 	ret = print_min_dev_size(fd, devid);
-out:
 	close_file_or_dir(fd, dirstream);
-
+out:
 	return !!ret;
 }
 

@@ -24,7 +24,12 @@ _not_run()
 run_check()
 {
 	echo "############### $@" >> $RESULTS 2>&1
-	"$@" >> $RESULTS 2>&1 || _fail "failed: $@"
+	if [ "$TEST_LOG" = 'tty' ]; then echo "CMD: $@" > /dev/tty; fi
+	if [ "$1" = 'root_helper' ]; then
+		"$@" >> $RESULTS 2>&1 || _fail "failed: $@"
+	else
+		$INSTRUMENT "$@" >> $RESULTS 2>&1 || _fail "failed: $@"
+	fi
 }
 
 # same as run_check but the stderr+stdout output is duplicated on stdout and
@@ -32,14 +37,28 @@ run_check()
 run_check_stdout()
 {
 	echo "############### $@" >> $RESULTS 2>&1
-	"$@" 2>&1 | tee -a $RESULTS || _fail "failed: $@"
+	if [ "$TEST_LOG" = 'tty' ]; then echo "CMD(stdout): $@" > /dev/tty; fi
+	if [ "$1" = 'root_helper' ]; then
+		"$@" 2>&1 | tee -a $RESULTS || _fail "failed: $@"
+	else
+		$INSTRUMENT "$@" 2>&1 | tee -a $RESULTS || _fail "failed: $@"
+	fi
 }
 
 # same as run_check but does not fail the test, output is logged
 run_mayfail()
 {
 	echo "############### $@" >> $RESULTS 2>&1
-	"$@" >> $RESULTS 2>&1 || _log "failed (ignored): $@"
+	if [ "$TEST_LOG" = 'tty' ]; then echo "CMD(mayfail): $@" > /dev/tty; fi
+	if [ "$1" = 'root_helper' ]; then
+		"$@" >> $RESULTS 2>&1
+	else
+		$INSTRUMENT "$@" >> $RESULTS 2>&1
+	fi
+	if [ $? != 0 ]; then
+		echo "failed (ignored): $@" >> $RESULTS
+		return 1
+	fi
 }
 
 check_prereq()
@@ -62,51 +81,66 @@ check_image()
 	run_check $TOP/btrfs check $image
 }
 
-# Process all image dumps in a given directory,
+# Extract a usable image from packed formats
 # - raw btrfs filesystem images, suffix .raw
 # - dtto compressed by XZ, suffix .raw.xz
 # - meta-dump images with suffix .img
 # - dtto compressed by XZ, suffix .img.xz
+extract_image()
+{
+	local image
+	local cleanme
+
+	image="$1"
+	case "$image" in
+	*.img)
+		rm -f $image.restored
+		: ;;
+	*.img.xz)
+		xz --decompress --keep "$image" || \
+			_fail "failed to decompress image $image" >&2
+		image=${image%%.xz}
+		rm -f $image.restored
+		cleanme=$image
+		;;
+	*.raw)
+		cp --sparse=auto $image $image.restored
+		;;
+	*.raw.xz)
+		xz --decompress --keep "$image" || \
+			_fail "failed to decompress image $image" >&2
+		image=${image%%.xz}
+		mv "$image" "$image".restored
+		;;
+	esac
+
+	if ! [ -f $image.restored ]; then
+		echo "restoring image $(basename $image)" >> $RESULTS
+		$TOP/btrfs-image -r $image $image.restored \
+			&>> $RESULTS \
+			|| _fail "failed to restore image $image" >&2
+	fi
+
+	[ -f "$cleanme" ] && rm -f "$cleanme"
+
+	echo "$image.restored"
+}
+
+# Process all image dumps in a given directory
 check_all_images()
 {
-	dir=$1
+	local dir
+	local extracted
+
+	dir="$1"
 	for image in $(find $dir \( -iname '*.img' -o	\
 				-iname '*.img.xz' -o 	\
 				-iname '*.raw' -o 	\
 				-iname '*.raw.xz' \) | sort)
 	do
-		cleanme=
-		case "$image" in
-		*.img)
-			rm -f $image.restored
-			: ;;
-		*.img.xz)
-			xz --decompress --keep "$image" || \
-				_fail "failed to decompress image $image"
-			image=${image%%.xz}
-			rm -f $image.restored
-			cleanme=$image
-			;;
-		*.raw)
-			cp --sparse=auto $image $image.restored
-			;;
-		*.raw.xz)
-			xz --decompress --keep "$image" || \
-				_fail "failed to decompress image $image"
-			image=${image%%.xz}
-			mv "$image" "$image".restored
-			;;
-		esac
-
-		if ! [ -f $image.restored ]; then
-			echo "restoring image $(basename $image)" >> $RESULTS
-			$TOP/btrfs-image -r $image $image.restored || \
-				_fail "failed to restore image $image"
-		fi
-
-		check_image $image.restored
-
-		rm -f $image.restored $cleanme
+		extracted=$(extract_image "$image")
+		check_image "$extracted"
+		rm -f "$extracted"
 	done
 }
 
@@ -139,7 +173,7 @@ root_helper()
 
 setup_root_helper()
 {
-	if [ $UID -eq 0 ]; then
+	if [ $UID -eq 0 -o -n "$SUDO_HELPER" ]; then
 		return
 	fi
 
@@ -162,7 +196,7 @@ prepare_test_dev()
 	local size="$1"
 
 	[[ "$TEST_DEV" ]] && return
-	[[ "$size" ]] || size='1G'
+	[[ "$size" ]] || size='2G'
 
 	echo "\$TEST_DEV not given, use $TOP/test/test.img as fallback" >> \
 		$RESULTS

@@ -42,6 +42,7 @@
 #include "volumes.h"
 #include "transaction.h"
 #include "utils.h"
+#include "list_sort.h"
 
 static u64 index_cnt = 2;
 static int verbose = 1;
@@ -152,7 +153,7 @@ err:
 }
 
 static int make_root_dir(struct btrfs_trans_handle *trans, struct btrfs_root *root,
-		int mixed, struct mkfs_allocation *allocation)
+		struct mkfs_allocation *allocation)
 {
 	struct btrfs_key location;
 	int ret;
@@ -328,7 +329,6 @@ static void print_usage(int ret)
 	fprintf(stderr, "\t-U|--uuid UUID          specify the filesystem UUID\n");
 	fprintf(stderr, "\t-q|--quiet              no messages except errors\n");
 	fprintf(stderr, "\t-V|--version            print the mkfs.btrfs version and exit\n");
-	fprintf(stderr, "%s\n", PACKAGE_STRING);
 	exit(ret);
 }
 
@@ -648,6 +648,12 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 
 	if (st->st_size <= BTRFS_MAX_INLINE_DATA_SIZE(root)) {
 		char *buffer = malloc(st->st_size);
+
+		if (!buffer) {
+			ret = -ENOMEM;
+			goto end;
+		}
+
 		ret_read = pread64(fd, buffer, st->st_size, bytes_read);
 		if (ret_read == -1) {
 			fprintf(stderr, "%s read failed\n", path_name);
@@ -668,12 +674,11 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 	 * do our IO in extent buffers so it can work
 	 * against any raid type
 	 */
-	eb = malloc(sizeof(*eb) + sectorsize);
+	eb = calloc(1, sizeof(*eb) + sectorsize);
 	if (!eb) {
 		ret = -ENOMEM;
 		goto end;
 	}
-	memset(eb, 0, sizeof(*eb) + sectorsize);
 
 again:
 
@@ -781,6 +786,8 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 
 	/* Add list for source directory */
 	dir_entry = malloc(sizeof(struct directory_name_entry));
+	if (!dir_entry)
+		return -ENOMEM;
 	dir_entry->dir_name = dir_name;
 	dir_entry->path = realpath(dir_name, real_path);
 	if (!dir_entry->path) {
@@ -882,6 +889,10 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 
 			if (S_ISDIR(st.st_mode)) {
 				dir_entry = malloc(sizeof(struct directory_name_entry));
+				if (!dir_entry) {
+					ret = -ENOMEM;
+					goto fail;
+				}
 				dir_entry->dir_name = cur_file->d_name;
 				dir_entry->path = make_path(parent_dir_entry->path,
 							    cur_file->d_name);
@@ -927,7 +938,7 @@ fail_no_dir:
 static int open_target(char *output_name)
 {
 	int output_fd;
-	output_fd = open(output_name, O_CREAT | O_RDWR | O_TRUNC,
+	output_fd = open(output_name, O_CREAT | O_RDWR,
 		         S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
 
 	return output_fd;
@@ -1078,32 +1089,29 @@ static u64 size_sourcedir(char *dir_name, u64 sectorsize,
 	return total_size;
 }
 
-static int zero_output_file(int out_fd, u64 size, u32 sectorsize)
+static int zero_output_file(int out_fd, u64 size)
 {
-	int len = sectorsize;
-	int loop_num = size / sectorsize;
+	int loop_num;
 	u64 location = 0;
-	char *buf = malloc(len);
+	char buf[4096];
 	int ret = 0, i;
 	ssize_t written;
 
-	if (!buf)
-		return -ENOMEM;
-	memset(buf, 0, len);
+	memset(buf, 0, 4096);
+	loop_num = size / 4096;
 	for (i = 0; i < loop_num; i++) {
-		written = pwrite64(out_fd, buf, len, location);
-		if (written != len)
+		written = pwrite64(out_fd, buf, 4096, location);
+		if (written != 4096)
 			ret = -EIO;
-		location += sectorsize;
+		location += 4096;
 	}
-	free(buf);
 	return ret;
 }
 
 static int is_ssd(const char *file)
 {
 	blkid_probe probe;
-	char wholedisk[32];
+	char wholedisk[PATH_MAX];
 	char sysfs_path[PATH_MAX];
 	dev_t devno;
 	int fd;
@@ -1148,6 +1156,13 @@ static int is_ssd(const char *file)
 	return !atoi((const char *)&rotational);
 }
 
+static int _cmp_device_by_id(void *priv, struct list_head *a,
+			     struct list_head *b)
+{
+	return list_entry(a, struct btrfs_device, dev_list)->devid -
+	       list_entry(b, struct btrfs_device, dev_list)->devid;
+}
+
 static void list_all_devices(struct btrfs_root *root)
 {
 	struct btrfs_fs_devices *fs_devices;
@@ -1160,15 +1175,14 @@ static void list_all_devices(struct btrfs_root *root)
 	list_for_each_entry(device, &fs_devices->devices, dev_list)
 		number_of_devices++;
 
+	list_sort(NULL, &fs_devices->devices, _cmp_device_by_id);
+
 	printf("Number of devices:  %d\n", number_of_devices);
 	/* printf("Total devices size: %10s\n", */
 		/* pretty_size(total_block_count)); */
 	printf("Devices:\n");
 	printf("   ID        SIZE  PATH\n");
-	list_for_each_entry_reverse(device, &fs_devices->devices, dev_list) {
-		char dev_uuid[BTRFS_UUID_UNPARSED_SIZE];
-
-		uuid_unparse(device->uuid, dev_uuid);
+	list_for_each_entry(device, &fs_devices->devices, dev_list) {
 		printf("  %3llu  %10s  %s\n",
 			device->devid,
 			pretty_size(device->total_bytes),
@@ -1440,8 +1454,6 @@ int main(int ac, char **av)
 				break;
 			case 'b':
 				block_count = parse_size(optarg);
-				if (block_count <= BTRFS_MKFS_SMALL_VOLUME_SIZE)
-					mixed = 1;
 				zero_end = 0;
 				break;
 			case 'V':
@@ -1465,6 +1477,11 @@ int main(int ac, char **av)
 			default:
 				print_usage(c != GETOPT_VAL_HELP);
 		}
+	}
+
+	if (verbose) {
+		printf("%s\n", PACKAGE_STRING);
+		printf("See %s for more information.\n\n", PACKAGE_URL);
 	}
 
 	sectorsize = max(sectorsize, (u32)sysconf(_SC_PAGESIZE));
@@ -1491,7 +1508,7 @@ int main(int ac, char **av)
 			exit(1);
 		}
 	}
-	
+
 	while (dev_cnt-- > 0) {
 		file = av[optind++];
 		if (is_block_device(file) == 1)
@@ -1504,12 +1521,6 @@ int main(int ac, char **av)
 
 	file = av[optind++];
 	ssd = is_ssd(file);
-
-	if (is_vol_small(file) || mixed) {
-		if (verbose)
-			printf("SMALL VOLUME: forcing mixed metadata/data groups\n");
-		mixed = 1;
-	}
 
 	/*
 	* Set default profiles according to number of added devices.
@@ -1544,6 +1555,19 @@ int main(int ac, char **av)
 		if (!nodesize_forced)
 			nodesize = best_nodesize;
 	}
+
+	/*
+	 * FS features that can be set by other means than -O
+	 * just set the bit here
+	 */
+	if (mixed)
+		features |= BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS;
+
+	if ((data_profile | metadata_profile) &
+	    (BTRFS_BLOCK_GROUP_RAID5 | BTRFS_BLOCK_GROUP_RAID6)) {
+		features |= BTRFS_FEATURE_INCOMPAT_RAID56;
+	}
+
 	if (btrfs_check_nodesize(nodesize, sectorsize,
 				 features))
 		exit(1);
@@ -1583,12 +1607,6 @@ int main(int ac, char **av)
 	if (ret)
 		exit(1);
 
-	/* if we are here that means all devs are good to btrfsify */
-	if (verbose) {
-		printf("%s\n", PACKAGE_STRING);
-		printf("See %s for more information.\n\n", PACKAGE_URL);
-	}
-
 	dev_cnt--;
 
 	if (!source_dir_set) {
@@ -1604,7 +1622,7 @@ int main(int ac, char **av)
 			exit(1);
 		}
 		ret = btrfs_prepare_device(fd, file, zero_end, &dev_block_count,
-					   block_count, &mixed, discard);
+					   block_count, discard);
 		if (ret) {
 			close(fd);
 			exit(1);
@@ -1624,7 +1642,7 @@ int main(int ac, char **av)
 					     &num_of_meta_chunks, &size_of_data);
 		if(block_count < source_dir_size)
 			block_count = source_dir_size;
-		ret = zero_output_file(fd, block_count, sectorsize);
+		ret = zero_output_file(fd, block_count);
 		if (ret) {
 			fprintf(stderr, "unable to zero the output file\n");
 			exit(1);
@@ -1649,18 +1667,6 @@ int main(int ac, char **av)
 		group_profile_max_safe_loss(data_profile)){
 		fprintf(stderr,
 			"WARNING: metatdata has lower redundancy than data!\n\n");
-	}
-
-	/*
-	 * FS features that can be set by other means than -O
-	 * just set the bit here
-	 */
-	if (mixed)
-		features |= BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS;
-
-	if ((data_profile | metadata_profile) &
-	    (BTRFS_BLOCK_GROUP_RAID5 | BTRFS_BLOCK_GROUP_RAID6)) {
-		features |= BTRFS_FEATURE_INCOMPAT_RAID56;
 	}
 
 	mkfs_cfg.label = label;
@@ -1704,7 +1710,7 @@ int main(int ac, char **av)
 		exit(1);
 	}
 
-	ret = make_root_dir(trans, root, mixed, &allocation);
+	ret = make_root_dir(trans, root, &allocation);
 	if (ret) {
 		fprintf(stderr, "failed to setup the root directory\n");
 		exit(1);
@@ -1725,8 +1731,6 @@ int main(int ac, char **av)
 		goto raid_groups;
 
 	while (dev_cnt-- > 0) {
-		int old_mixed = mixed;
-
 		file = av[optind++];
 
 		/*
@@ -1749,12 +1753,11 @@ int main(int ac, char **av)
 			continue;
 		}
 		ret = btrfs_prepare_device(fd, file, zero_end, &dev_block_count,
-					   block_count, &mixed, discard);
+					   block_count, discard);
 		if (ret) {
 			close(fd);
 			exit(1);
 		}
-		mixed = old_mixed;
 
 		ret = btrfs_add_to_fsid(trans, root, fd, file, dev_block_count,
 					sectorsize, sectorsize, sectorsize);

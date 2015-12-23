@@ -231,9 +231,17 @@ void print_chunk(struct extent_buffer *eb, struct btrfs_chunk *chunk)
 	printf("\t\ttype %s num_stripes %d\n",
 	       chunk_flags_str, num_stripes);
 	for (i = 0 ; i < num_stripes ; i++) {
+		unsigned char dev_uuid[BTRFS_UUID_SIZE];
+		char str_dev_uuid[BTRFS_UUID_UNPARSED_SIZE];
+
+		read_extent_buffer(eb, dev_uuid,
+			(unsigned long)btrfs_stripe_dev_uuid_nr(chunk, i),
+			BTRFS_UUID_SIZE);
+		uuid_unparse(dev_uuid, str_dev_uuid);
 		printf("\t\t\tstripe %d devid %llu offset %llu\n", i,
 		      (unsigned long long)btrfs_stripe_devid_nr(eb, chunk, i),
 		      (unsigned long long)btrfs_stripe_offset_nr(eb, chunk, i));
+		printf("\t\t\tdev uuid: %s\n", str_dev_uuid);
 	}
 }
 
@@ -481,12 +489,13 @@ static void print_root(struct extent_buffer *leaf, int slot)
 	memset(&root_item, 0, sizeof(root_item));
 	read_extent_buffer(leaf, &root_item, (unsigned long)ri, len);
 
-	printf("\t\troot data bytenr %llu level %d dirid %llu refs %u gen %llu\n",
+	printf("\t\troot data bytenr %llu level %d dirid %llu refs %u gen %llu lastsnap %llu\n",
 		(unsigned long long)btrfs_root_bytenr(&root_item),
 		btrfs_root_level(&root_item),
 		(unsigned long long)btrfs_root_dirid(&root_item),
 		btrfs_root_refs(&root_item),
-		(unsigned long long)btrfs_root_generation(&root_item));
+		(unsigned long long)btrfs_root_generation(&root_item),
+		(unsigned long long)btrfs_root_last_snapshot(&root_item));
 
 	if (root_item.generation == root_item.generation_v2) {
 		uuid_unparse(root_item.uuid, uuid_str);

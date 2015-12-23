@@ -53,6 +53,7 @@ static int cmd_device_add(int argc, char **argv)
 	DIR	*dirstream = NULL;
 	int discard = 1;
 	int force = 0;
+	int last_dev;
 
 	while (1) {
 		int c;
@@ -77,22 +78,20 @@ static int cmd_device_add(int argc, char **argv)
 		}
 	}
 
-	argc = argc - optind;
-
-	if (check_argc_min(argc, 2))
+	if (check_argc_min(argc - optind, 2))
 		usage(cmd_device_add_usage);
 
-	mntpnt = argv[optind + argc - 1];
+	last_dev = argc - 1;
+	mntpnt = argv[last_dev];
 
 	fdmnt = btrfs_open_dir(mntpnt, &dirstream, 1);
 	if (fdmnt < 0)
 		return 1;
 
-	for (i = optind; i < optind + argc - 1; i++){
+	for (i = optind; i < last_dev; i++){
 		struct btrfs_ioctl_vol_args ioctl_args;
 		int	devfd, res;
 		u64 dev_block_count = 0;
-		int mixed = 0;
 		char *path;
 
 		res = test_dev_for_mkfs(argv[i], force);
@@ -103,13 +102,13 @@ static int cmd_device_add(int argc, char **argv)
 
 		devfd = open(argv[i], O_RDWR);
 		if (devfd < 0) {
-			fprintf(stderr, "ERROR: Unable to open device '%s'\n", argv[i]);
+			error("unable to open device '%s'", argv[i]);
 			ret++;
 			continue;
 		}
 
 		res = btrfs_prepare_device(devfd, argv[i], 1, &dev_block_count,
-					   0, &mixed, discard);
+					   0, discard);
 		close(devfd);
 		if (res) {
 			ret++;
@@ -118,8 +117,7 @@ static int cmd_device_add(int argc, char **argv)
 
 		path = canonicalize_path(argv[i]);
 		if (!path) {
-			fprintf(stderr,
-				"ERROR: Could not canonicalize pathname '%s': %s\n",
+			error("could not canonicalize pathname '%s': %s",
 				argv[i], strerror(errno));
 			ret++;
 			goto error_out;
@@ -130,7 +128,7 @@ static int cmd_device_add(int argc, char **argv)
 		res = ioctl(fdmnt, BTRFS_IOC_ADD_DEV, &ioctl_args);
 		e = errno;
 		if (res < 0) {
-			fprintf(stderr, "ERROR: error adding the device '%s' - %s\n",
+			error("error adding device '%s': %s",
 				path, strerror(e));
 			ret++;
 		}
@@ -139,7 +137,6 @@ static int cmd_device_add(int argc, char **argv)
 
 error_out:
 	close_file_or_dir(fdmnt, dirstream);
-	btrfs_close_all_devices();
 	return !!ret;
 }
 
@@ -163,9 +160,8 @@ static int _cmd_device_remove(int argc, char **argv,
 		struct	btrfs_ioctl_vol_args arg;
 		int	res;
 
-		if (is_block_device(argv[i]) != 1) {
-			fprintf(stderr,
-				"ERROR: %s is not a block device\n", argv[i]);
+		if (is_block_device(argv[i]) != 1 && strcmp(argv[i], "missing")) {
+			error("not a block device: %s", argv[i]);
 			ret++;
 			continue;
 		}
@@ -180,8 +176,7 @@ static int _cmd_device_remove(int argc, char **argv,
 				msg = btrfs_err_str(res);
 			else
 				msg = strerror(e);
-			fprintf(stderr,
-				"ERROR: error removing the device '%s' - %s\n",
+			error("error removing device '%s': %s",
 				argv[i], msg);
 			ret++;
 		}
@@ -253,11 +248,9 @@ static int cmd_device_scan(int argc, char **argv)
 	if (all || argc == 1) {
 		printf("Scanning for Btrfs filesystems\n");
 		ret = btrfs_scan_lblkid();
-		if (ret)
-			fprintf(stderr, "ERROR: error %d while scanning\n", ret);
+		error_on(ret, "error %d while scanning", ret);
 		ret = btrfs_register_all_devices();
-		if (ret)
-			fprintf(stderr, "ERROR: error %d while registering\n", ret);
+		error_on(ret, "error %d while registering devices", ret);
 		goto out;
 	}
 
@@ -265,15 +258,13 @@ static int cmd_device_scan(int argc, char **argv)
 		char *path;
 
 		if (is_block_device(argv[i]) != 1) {
-			fprintf(stderr,
-				"ERROR: %s is not a block device\n", argv[i]);
+			error("not a block device: %s", argv[i]);
 			ret = 1;
 			goto out;
 		}
 		path = canonicalize_path(argv[i]);
 		if (!path) {
-			fprintf(stderr,
-				"ERROR: Could not canonicalize path '%s': %s\n",
+			error("could not canonicalize path '%s': %s",
 				argv[i], strerror(errno));
 			ret = 1;
 			goto out;
@@ -288,7 +279,6 @@ static int cmd_device_scan(int argc, char **argv)
 	}
 
 out:
-	btrfs_close_all_devices();
 	return !!ret;
 }
 
@@ -316,16 +306,14 @@ static int cmd_device_ready(int argc, char **argv)
 
 	path = canonicalize_path(argv[argc - 1]);
 	if (!path) {
-		fprintf(stderr,
-			"ERROR: Could not canonicalize pathname '%s': %s\n",
+		error("could not canonicalize pathname '%s': %s",
 			argv[argc - 1], strerror(errno));
 		ret = 1;
 		goto out;
 	}
 
 	if (is_block_device(path) != 1) {
-		fprintf(stderr,
-			"ERROR: %s is not a block device\n", path);
+		error("not a block device: %s", path);
 		ret = 1;
 		goto out;
 	}
@@ -334,9 +322,8 @@ static int cmd_device_ready(int argc, char **argv)
 	strncpy_null(args.name, path);
 	ret = ioctl(fd, BTRFS_IOC_DEVICES_READY, &args);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: unable to determine if the device '%s'"
-			" is ready for mounting - %s\n", path,
-			strerror(errno));
+		error("unable to determine if device '%s' is ready for mount: %s",
+			path, strerror(errno));
 		ret = 1;
 	}
 
@@ -385,28 +372,19 @@ static int cmd_device_stats(int argc, char **argv)
 
 	dev_path = argv[optind];
 
-	fdmnt = open_path_or_dev_mnt(dev_path, &dirstream);
-
-	if (fdmnt < 0) {
-		if (errno == EINVAL)
-			fprintf(stderr,
-				"ERROR: '%s' is not a mounted btrfs device\n",
-				dev_path);
-		else
-			fprintf(stderr, "ERROR: can't access '%s': %s\n",
-				dev_path, strerror(errno));
+	fdmnt = open_path_or_dev_mnt(dev_path, &dirstream, 1);
+	if (fdmnt < 0)
 		return 1;
-	}
 
 	ret = get_fs_info(dev_path, &fi_args, &di_args);
 	if (ret) {
-		fprintf(stderr, "ERROR: getting dev info for devstats failed: "
-				"%s\n", strerror(-ret));
+		error("getting dev info for devstats failed: %s",
+			strerror(-ret));
 		err = 1;
 		goto out;
 	}
 	if (!fi_args.num_devices) {
-		fprintf(stderr, "ERROR: no devices found\n");
+		error("no devices found");
 		err = 1;
 		goto out;
 	}
@@ -424,9 +402,8 @@ static int cmd_device_stats(int argc, char **argv)
 		args.flags = flags;
 
 		if (ioctl(fdmnt, BTRFS_IOC_GET_DEV_STATS, &args) < 0) {
-			fprintf(stderr,
-				"ERROR: ioctl(BTRFS_IOC_GET_DEV_STATS) on %s failed: %s\n",
-				path, strerror(errno));
+			error("DEV_STATS ioctl failed on %s: %s",
+			      path, strerror(errno));
 			err = 1;
 		} else {
 			char *canonical_path;
@@ -466,7 +443,6 @@ static int cmd_device_stats(int argc, char **argv)
 out:
 	free(di_args);
 	close_file_or_dir(fdmnt, dirstream);
-	btrfs_close_all_devices();
 
 	return err;
 }
@@ -474,7 +450,7 @@ out:
 static const char * const cmd_device_usage_usage[] = {
 	"btrfs device usage [options] <path> [<path>..]",
 	"Show detailed information about internal allocations in devices.",
-	HELPINFO_OUTPUT_UNIT_DF,
+	HELPINFO_UNITS_SHORT_LONG,
 	NULL
 };
 
@@ -511,7 +487,6 @@ static int cmd_device_usage(int argc, char **argv)
 {
 	unsigned unit_mode;
 	int ret = 0;
-	int more_than_one = 0;
 	int i;
 
 	unit_mode = get_unit_mode_from_arg(&argc, argv, 1);
@@ -523,23 +498,22 @@ static int cmd_device_usage(int argc, char **argv)
 		int fd;
 		DIR *dirstream = NULL;
 
-		if (more_than_one)
+		if (i > 1)
 			printf("\n");
 
 		fd = btrfs_open_dir(argv[i], &dirstream, 1);
 		if (fd < 0) {
 			ret = 1;
-			goto out;
+			break;
 		}
 
 		ret = _cmd_device_usage(fd, argv[i], unit_mode);
 		close_file_or_dir(fd, dirstream);
 
 		if (ret)
-			goto out;
-		more_than_one = 1;
+			break;
 	}
-out:
+
 	return !!ret;
 }
 

@@ -1449,7 +1449,7 @@ static struct btrfs_root * link_subvol(struct btrfs_root *root,
 	int ret;
 
 	len = strlen(base);
-	if (len < 1 || len > BTRFS_NAME_LEN)
+	if (len == 0 || len > BTRFS_NAME_LEN)
 		return NULL;
 
 	path = btrfs_alloc_path();
@@ -2292,6 +2292,7 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 {
 	int i, ret, blocks_per_node;
 	int fd = -1;
+	int is_btrfs = 0;
 	u32 blocksize;
 	u64 blocks[7];
 	u64 total_bytes;
@@ -2459,6 +2460,7 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		fprintf(stderr, "unable to migrate super block\n");
 		goto fail;
 	}
+	is_btrfs = 1;
 
 	root = open_ctree_fd(fd, devname, 0, OPEN_CTREE_WRITES);
 	if (!root) {
@@ -2479,7 +2481,11 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 fail:
 	if (fd != -1)
 		close(fd);
-	fprintf(stderr, "conversion aborted.\n");
+	if (is_btrfs)
+		fprintf(stderr,
+			"WARNING: an error occured during chunk mapping fixup, filesystem mountable but not finalized\n");
+	else
+		fprintf(stderr, "conversion aborted\n");
 	return -1;
 }
 
@@ -2589,6 +2595,23 @@ static int do_rollback(const char *devname)
 	}
 
 	btrfs_init_path(&path);
+
+	key.objectid = CONV_IMAGE_SUBVOL_OBJECTID;
+	key.type = BTRFS_ROOT_BACKREF_KEY;
+	key.offset = BTRFS_FS_TREE_OBJECTID;
+	ret = btrfs_search_slot(NULL, root->fs_info->tree_root, &key, &path, 0,
+				0);
+	btrfs_release_path(&path);
+	if (ret > 0) {
+		fprintf(stderr,
+		"ERROR: unable to convert ext2 image subvolume, is it deleted?\n");
+		goto fail;
+	} else if (ret < 0) {
+		fprintf(stderr,
+			"ERROR: unable to open ext2_subvol, id=%llu: %s\n",
+			(unsigned long long)key.objectid, strerror(-ret));
+		goto fail;
+	}
 
 	key.objectid = CONV_IMAGE_SUBVOL_OBJECTID;
 	key.type = BTRFS_ROOT_ITEM_KEY;
